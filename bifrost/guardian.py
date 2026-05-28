@@ -148,11 +148,6 @@ def banner(config):
 
 
 class AuditdCollector(threading.Thread):
-    """
-    Reads auditd logs and feeds execve, auth, and
-    privilege escalation events into the event queue.
-    """
-
     AUDIT_LOG = Path("/var/log/audit/audit.log")
 
     def __init__(self, queue, log):
@@ -190,11 +185,6 @@ class AuditdCollector(threading.Thread):
 
 
 class HoneypotLogCollector(threading.Thread):
-    """
-    Tails Cowrie JSON log and feeds login attempts,
-    commands, and file downloads into the event queue.
-    """
-
     COWRIE_LOG = Path(
         "~/Projects/honeypot/logs/cowrie/cowrie.json"
     ).expanduser()
@@ -231,12 +221,6 @@ class HoneypotLogCollector(threading.Thread):
 
 
 class ProcessWatcher(threading.Thread):
-    """
-    Polls /proc for suspicious processes using precise
-    exe readlink. Evicts dead PIDs to prevent memory leaks.
-    Detects execve from scratch paths and kernel masquerades.
-    """
-
     POLL_INTERVAL = 2.0
     SUSPICIOUS_PATHS = ["/tmp/", "/dev/shm/", "/var/tmp/"]
     KERNEL_THREAD_PATTERN = ["kworker", "kthread", "ksoftirqd"]
@@ -274,7 +258,8 @@ class ProcessWatcher(threading.Thread):
                             p in resolved_exe for p in self.SUSPICIOUS_PATHS
                         )
                         is_hidden_masquerade = (
-                            any(p in cmdline for p in self.KERNEL_THREAD_PATTERN)
+                            any(p in cmdline
+                                for p in self.KERNEL_THREAD_PATTERN)
                             and not resolved_exe.startswith("/kernel")
                             and resolved_exe != ""
                         )
@@ -282,7 +267,8 @@ class ProcessWatcher(threading.Thread):
                         if is_suspicious_path or is_hidden_masquerade:
                             event = {
                                 "source": "process.watcher",
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "timestamp": datetime.now(
+                                    timezone.utc).isoformat(),
                                 "boundary": "HOST",
                                 "raw": {
                                     "pid": pid,
@@ -301,12 +287,10 @@ class ProcessWatcher(threading.Thread):
                     except (PermissionError, FileNotFoundError):
                         continue
 
-                # Evict dead PIDs to prevent memory leaks
                 current_pids = {
                     int(p.name) for p in Path("/proc").glob("[0-9]*")
                 }
                 self.seen_pids &= current_pids
-
                 SHUTDOWN.wait(self.POLL_INTERVAL)
 
             except Exception as e:
@@ -315,11 +299,6 @@ class ProcessWatcher(threading.Thread):
 
 
 class NetworkWatcher(threading.Thread):
-    """
-    Monitors /proc/net/tcp for new outbound connections.
-    Flags honeypot port connections targeting host subnet.
-    """
-
     POLL_INTERVAL = 3.0
     HOST_SUBNET = "192.168.0."
     HONEYPOT_PORTS = {2222, 23, 445, 1433, 21, 25, 8888, 3389, 5900}
@@ -373,7 +352,8 @@ class NetworkWatcher(threading.Thread):
                             self.HOST_SUBNET in remote_ip):
                         event = {
                             "source": "network_watcher",
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "timestamp": datetime.now(
+                                timezone.utc).isoformat(),
                             "boundary": "HOST",
                             "raw": {
                                 "local_ip": local_ip,
@@ -391,12 +371,6 @@ class NetworkWatcher(threading.Thread):
 
 
 class EventRouter(threading.Thread):
-    """
-    Reads events from the queue, stores them in SQLite,
-    routes HOST events to the Bifrost extractor pipeline.
-    HONEYPOT events are logged only unless breakout detected.
-    """
-
     def __init__(self, queue, config, db_path, log):
         super().__init__(daemon=True, name="bifrost.router")
         self.queue = queue
@@ -431,7 +405,6 @@ class EventRouter(threading.Thread):
             self.extractor_model = None
 
     def compress_event(self, event):
-        """Strip noise from raw event using 1.5B extractor model."""
         if not self.extractor_client:
             raw = json.dumps(event.get("raw", {}))
             return raw[:500]
@@ -461,7 +434,6 @@ class EventRouter(threading.Thread):
             return json.dumps(event.get("raw", {}))[:500]
 
     def route_to_heimdall(self, compressed, event):
-        """Send compressed event to Heimdall for decision."""
         try:
             baseline = self.config.get("system_baseline", "")
             response = self.analyst_client.chat.completions.create(
@@ -485,7 +457,6 @@ class EventRouter(threading.Thread):
             return None
 
     def store_event(self, event, compressed=None, decision=None):
-        """Store event and decision in SQLite."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
@@ -528,7 +499,6 @@ class EventRouter(threading.Thread):
                         f"Bifrost: {self.event_count} events processed."
                     )
 
-                # Honeypot zone — log only unless breakout signal
                 raw_data = event.get("raw", {})
                 is_breakout = (
                     isinstance(raw_data, dict) and
@@ -542,7 +512,6 @@ class EventRouter(threading.Thread):
                     self.store_event(event)
                     continue
 
-                # HOST zone or breakout — route through Heimdall
                 self.log.info(
                     f"[{boundary}] [{source}] Routing to Heimdall."
                 )
@@ -561,21 +530,16 @@ class EventRouter(threading.Thread):
                         f"confidence={confidence}"
                     )
 
-                    # Autonomous actions
                     if action in ["KILL", "BLOCK", "QUARANTINE"]:
                         self.log.warning(
                             f"[!!!] AUTONOMOUS ACTION: {action} — "
                             f"{decision.get('reasoning', '')}"
                         )
-                        # Executor called here — built next in Go
-                        # executor.execute(action, decision, event_id)
 
-                    # Gjallarhorn alert
                     tier = decision.get("gjallarhorn_tier", 1)
                     self.log.info(
                         f"Gjallarhorn Tier {tier} alert queued."
                     )
-                    # gjallarhorn.alert(tier, decision)
 
             except Empty:
                 continue
@@ -603,6 +567,13 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
+    # Start HTTP ingest server
+    # Receives events from Go collector agent
+    from bifrost.ingest import IngestServer
+    ingest_server = IngestServer(EVENT_QUEUE)
+    ingest_server.start()
+    log.info("Ingest server started on http://127.0.0.1:8765/ingest")
+
     collectors = [
         AuditdCollector(EVENT_QUEUE, log),
         HoneypotLogCollector(EVENT_QUEUE, log),
@@ -623,6 +594,7 @@ def main():
         time.sleep(1.0)
 
     log.info("Shutting down...")
+    ingest_server.stop()
     for collector in collectors:
         collector.join(timeout=3.0)
     router.join(timeout=3.0)
