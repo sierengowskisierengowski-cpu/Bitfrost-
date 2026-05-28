@@ -1,0 +1,77 @@
+# Bifrost — Tetragon Network Tracing Policy
+# Watches outbound connections, DNS queries, and
+# network namespace violations at kernel level.
+# Critical for detecting C2 beaconing and
+# container escape via network.
+
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: bifrost-network-watch
+  namespace: kube-system
+spec:
+  kprobes:
+
+  # Watch all connect() calls — outbound connections
+  - call: "sys_connect"
+    syscall: true
+    args:
+    - index: 0
+      type: "int"
+    - index: 1
+      type: "sockaddr"
+    - index: 2
+      type: "int"
+    selectors:
+    - matchActions:
+      - action: Post
+        rateLimit: "20/second"
+
+  # Watch bind() — new listening ports
+  - call: "sys_bind"
+    syscall: true
+    args:
+    - index: 0
+      type: "int"
+    - index: 1
+      type: "sockaddr"
+    selectors:
+    - matchActions:
+      - action: Post
+
+  # Watch sendto() — data exfiltration detection
+  - call: "sys_sendto"
+    syscall: true
+    args:
+    - index: 0
+      type: "int"
+    - index: 4
+      type: "sockaddr"
+    selectors:
+    - matchActions:
+      - action: Post
+        rateLimit: "10/second"
+
+  # Watch setns() — namespace switching
+  # Container escape often involves switching namespaces
+  - call: "sys_setns"
+    syscall: true
+    args:
+    - index: 0
+      type: "int"
+    - index: 1
+      type: "int"
+    selectors:
+    - matchActions:
+      - action: Post
+
+  # Watch unshare() — namespace creation
+  # Used in container escape techniques
+  - call: "sys_unshare"
+    syscall: true
+    args:
+    - index: 0
+      type: "int"
+    selectors:
+    - matchActions:
+      - action: Post
