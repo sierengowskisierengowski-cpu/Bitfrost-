@@ -681,10 +681,7 @@ class EventRouter(threading.Thread):
 
     def run(self):
         self.log.info("EventRouter started. Bifrost pipeline active.")
-        while True:
-            if SHUTDOWN.is_set() and self.queue.empty():
-                break
-
+        while not (SHUTDOWN.is_set() and self.queue.empty()):
             event = None
             try:
                 event = self.queue.get(timeout=1.0)
@@ -753,9 +750,13 @@ class EventRouter(threading.Thread):
 
 
 def drain_event_queue(queue: Queue, timeout: float, poll_interval: float = 0.1):
+    """
+    Wait for all queued tasks to be marked done before the timeout expires.
+    Returns (drained, remaining_tasks).
+    """
     deadline = time.monotonic() + timeout
     while True:
-        remaining = getattr(queue, "unfinished_tasks", queue.qsize())
+        remaining = queue.unfinished_tasks
         if remaining <= 0:
             return True, 0
         if time.monotonic() >= deadline:
@@ -827,7 +828,7 @@ def main():
     if router.is_alive():
         log.warning("Router still alive after shutdown timeout.")
 
-    remaining = getattr(EVENT_QUEUE, "unfinished_tasks", EVENT_QUEUE.qsize())
+    remaining = EVENT_QUEUE.unfinished_tasks
     with METRICS_LOCK:
         log.info(
             "Shutdown summary: processed=%d dropped=%d remaining=%d",
