@@ -36,6 +36,10 @@ class _FakeEvent:
     port = 0
 
 
+def _raise_bad_event(_data):
+    raise ValueError("bad event")
+
+
 def test_network_watcher_hex_to_ip_logs_invalid_input_once(caplog):
     watcher = NetworkWatcher(Queue(), logging.getLogger("test.network"))
 
@@ -79,7 +83,7 @@ def test_bpf_collector_logs_parse_error_once(caplog):
         threading.Event(),
         logging.getLogger("test.bpf.parse"),
     )
-    collector.bpf = _FakeBPF(lambda data: (_ for _ in ()).throw(ValueError("bad event")))
+    collector.bpf = _FakeBPF(_raise_bad_event)
 
     with caplog.at_level(logging.WARNING):
         collector.handle_event(0, object(), 0)
