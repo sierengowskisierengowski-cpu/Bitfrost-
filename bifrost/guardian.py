@@ -60,6 +60,9 @@ def setup_logging():
 
 
 def load_config():
+    log = logging.getLogger("heimdall.guardian")
+    production_mode = os.getenv("HEIMDALL_ENV", "production").strip().lower() == "production"
+
     if not CONFIG_PATH.exists():
         print("[!] heimdall_config.json not found.")
         print("[!] Run python setup.py first.")
@@ -69,15 +72,22 @@ def load_config():
         config = json.load(f)
 
     checksum_path = CONFIG_PATH.with_suffix(".sha256")
-    if checksum_path.exists():
-        import hashlib
-        actual = hashlib.sha256(CONFIG_PATH.read_bytes()).hexdigest()
-        expected = checksum_path.read_text().strip()
-        if actual != expected:
-            print("[!] CRITICAL: Config checksum mismatch.")
-            print("[!] heimdall_config.json may have been tampered with.")
+    if not checksum_path.exists():
+        if production_mode:
+            log.critical("CRITICAL: Config checksum file missing: %s", checksum_path)
+            log.critical("Refusing startup in production mode without config integrity verification.")
             sys.exit(1)
-        print("[+] Config integrity verified.")
+        log.warning("Config checksum file missing; skipping integrity verification in non-production mode.")
+        return config
+
+    import hashlib
+    actual = hashlib.sha256(CONFIG_PATH.read_bytes()).hexdigest()
+    expected = checksum_path.read_text().strip()
+    if actual != expected:
+        log.critical("CRITICAL: Config checksum mismatch.")
+        log.critical("heimdall_config.json may have been tampered with.")
+        sys.exit(1)
+    log.info("Config integrity verified.")
 
     return config
 
