@@ -484,6 +484,10 @@ class NetworkWatcher(threading.Thread):
 
 class EventRouter(threading.Thread):
     LLM_TIMEOUT = 30.0
+    DEFAULT_STAGE_QUEUE_SIZE = 256
+    DEFAULT_COMPRESS_WORKERS = 2
+    DEFAULT_REASON_WORKERS = 2
+    DEFAULT_STORAGE_WORKERS = 1
 
     def __init__(self, queue, config, db_path, log):
         super().__init__(daemon=True, name="bifrost.router")
@@ -493,6 +497,35 @@ class EventRouter(threading.Thread):
         self.log = log
         self.event_count = 0
         self.conn = None
+        self.db_lock = threading.Lock()
+        self.stage_queue_size = max(
+            1,
+            int(self.config.get(
+                "router_stage_queue_size", self.DEFAULT_STAGE_QUEUE_SIZE
+            ))
+        )
+        self.compress_worker_count = max(
+            1,
+            int(self.config.get(
+                "router_compress_workers", self.DEFAULT_COMPRESS_WORKERS
+            ))
+        )
+        self.reason_worker_count = max(
+            1,
+            int(self.config.get(
+                "router_reason_workers", self.DEFAULT_REASON_WORKERS
+            ))
+        )
+        self.storage_worker_count = max(
+            1,
+            int(self.config.get(
+                "router_storage_workers", self.DEFAULT_STORAGE_WORKERS
+            ))
+        )
+        self.compress_queue = Queue(maxsize=self.stage_queue_size)
+        self.reason_queue = Queue(maxsize=self.stage_queue_size)
+        self.storage_queue = Queue(maxsize=self.stage_queue_size)
+        self.pipeline_workers = []
         self.setup_inference_clients()
         self.setup_db()
 
@@ -647,86 +680,192 @@ class EventRouter(threading.Thread):
         action = decision.get("action_required", "NONE") if decision else None
 
         try:
-            cursor = self.conn.cursor()
-            cursor.execute("""
-                INSERT INTO events
-                (timestamp, source, boundary, raw_event,
-                 compressed_event, heimdall_decision, action_taken)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
-                timestamp, source, boundary, raw,
-                compressed if isinstance(compressed, str) else json.dumps(compressed),
-                json.dumps(decision) if decision else None,
-                action
-            ))
-            self.conn.commit()
-            return cursor.lastrowid
+            with self.db_lock:
+                cursor = self.conn.cursor()
+                cursor.execute("""
+                    INSERT INTO events
+                    (timestamp, source, boundary, raw_event,
+                     compressed_event, heimdall_decision, action_taken)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    timestamp, source, boundary, raw,
+                    compressed if isinstance(compressed, str) else json.dumps(compressed),
+                    json.dumps(decision) if decision else None,
+                    action
+                ))
+                self.conn.commit()
+                return cursor.lastrowid
         except sqlite3.Error as e:
             self.log.error(f"DB store error: {e}")
             return -1
 
-    def run(self):
-        self.log.info("EventRouter started. Bifrost pipeline active.")
-        while not SHUTDOWN.is_set():
+    def _put_with_backpressure(self, queue: Queue, item: dict, queue_name: str) -> bool:
+        while True:
             try:
-                event = self.queue.get(timeout=1.0)
-                boundary = event.get("boundary", "UNKNOWN")
-                source = event.get("source", "unknown")
-
-                self.event_count += 1
-                if self.event_count % 100 == 0:
-                    with METRICS_LOCK:
-                        self.log.info(
-                            f"Bifrost metrics: {json.dumps(METRICS)}"
-                        )
-
-                raw_data = event.get("raw", {})
-                is_breakout = (
-                    isinstance(raw_data, dict) and
-                    raw_data.get("alert") in [
-                        "honeypot_to_host_connection",
-                        "container_escape_detected"
-                    ]
+                queue.put(item, timeout=0.2)
+                return True
+            except Full:
+                self.log.warning(
+                    f"{queue_name} full. Applying backpressure to upstream stage."
                 )
+        return False
 
-                if boundary == "HONEYPOT" and not is_breakout:
-                    self.store_event(event)
-                    self.queue.task_done()
-                    continue
+    def _record_metrics(self):
+        self.event_count += 1
+        if self.event_count % 100 == 0:
+            with METRICS_LOCK:
+                self.log.info(f"Bifrost metrics: {json.dumps(METRICS)}")
 
-                self.log.info(
-                    f"[{boundary}] [{source}] Routing to Heimdall."
+    def _is_honeypot_breakout(self, event: dict) -> bool:
+        raw_data = event.get("raw", {})
+        return (
+            isinstance(raw_data, dict) and
+            raw_data.get("alert") in [
+                "honeypot_to_host_connection",
+                "container_escape_detected"
+            ]
+        )
+
+    def _dispatch_event(self, event: dict):
+        boundary = event.get("boundary", "UNKNOWN")
+        source = event.get("source", "unknown")
+
+        if boundary == "HONEYPOT" and not self._is_honeypot_breakout(event):
+            self._put_with_backpressure(
+                self.storage_queue,
+                {"event": event, "compressed": None, "decision": None},
+                "router.storage_queue"
+            )
+            return
+
+        self.log.info(f"[{boundary}] [{source}] Routing to Heimdall.")
+        self._put_with_backpressure(
+            self.compress_queue,
+            {"event": event},
+            "router.compress_queue"
+        )
+
+    def _compression_worker(self):
+        while not SHUTDOWN.is_set() or not self.compress_queue.empty():
+            try:
+                payload = self.compress_queue.get(timeout=0.2)
+            except Empty:
+                continue
+
+            try:
+                event = payload["event"]
+                payload["compressed"] = self.compress_event(event)
+            except Exception as e:
+                self.log.error(f"Compression worker error: {e}")
+                payload["compressed"] = json.dumps(
+                    payload.get("event", {}).get("raw", {})
+                )[:500]
+
+            self._put_with_backpressure(
+                self.reason_queue, payload, "router.reason_queue"
+            )
+            self.compress_queue.task_done()
+
+    def _reasoning_worker(self):
+        while not SHUTDOWN.is_set() or not self.reason_queue.empty():
+            try:
+                payload = self.reason_queue.get(timeout=0.2)
+            except Empty:
+                continue
+
+            try:
+                payload["decision"] = self.route_to_heimdall(
+                    payload.get("compressed", "")
                 )
+            except Exception as e:
+                self.log.error(f"Reasoning worker error: {e}")
+                payload["decision"] = self._safe_fallback("reasoning_worker_error")
 
-                compressed = self.compress_event(event)
-                decision = self.route_to_heimdall(compressed)
-                self.store_event(event, compressed, decision)
+            self._put_with_backpressure(
+                self.storage_queue, payload, "router.storage_queue"
+            )
+            self.reason_queue.task_done()
 
-                severity = decision.get("severity", "UNKNOWN")
-                action = decision.get("action_required", "NONE")
-                confidence = decision.get("confidence", 0.0)
+    def _storage_worker(self):
+        while not SHUTDOWN.is_set() or not self.storage_queue.empty():
+            try:
+                payload = self.storage_queue.get(timeout=0.2)
+            except Empty:
+                continue
 
-                self.log.info(
-                    f"Heimdall: action={action} severity={severity} "
-                    f"confidence={confidence:.2f}"
-                )
+            try:
+                event = payload["event"]
+                decision = payload.get("decision")
+                self.store_event(event, payload.get("compressed"), decision)
 
-                if action in ["KILL", "BLOCK", "QUARANTINE"]:
-                    self.log.warning(
-                        f"[!!!] ACTION PROPOSED: {action} — "
-                        f"{decision.get('reasoning', '')} "
-                        f"[DRY RUN — not enforced]"
+                if decision:
+                    severity = decision.get("severity", "UNKNOWN")
+                    action = decision.get("action_required", "NONE")
+                    confidence = decision.get("confidence", 0.0)
+
+                    self.log.info(
+                        f"Heimdall: action={action} severity={severity} "
+                        f"confidence={confidence:.2f}"
                     )
 
-                tier = decision.get("gjallarhorn_tier", 1)
-                self.log.info(f"Gjallarhorn Tier {tier} alert queued.")
-                self.queue.task_done()
+                    if action in ["KILL", "BLOCK", "QUARANTINE"]:
+                        self.log.warning(
+                            f"[!!!] ACTION PROPOSED: {action} — "
+                            f"{decision.get('reasoning', '')} "
+                            f"[DRY RUN — not enforced]"
+                        )
 
+                    tier = decision.get("gjallarhorn_tier", 1)
+                    self.log.info(f"Gjallarhorn Tier {tier} alert queued.")
+            except Exception as e:
+                self.log.error(f"Storage worker error: {e}")
+            finally:
+                self.queue.task_done()
+                self.storage_queue.task_done()
+
+    def _start_pipeline_workers(self):
+        if self.pipeline_workers:
+            return
+
+        worker_specs = (
+            ("compress", self.compress_worker_count, self._compression_worker),
+            ("reason", self.reason_worker_count, self._reasoning_worker),
+            ("storage", self.storage_worker_count, self._storage_worker),
+        )
+
+        for stage_name, count, target in worker_specs:
+            for index in range(count):
+                worker = threading.Thread(
+                    target=target,
+                    daemon=True,
+                    name=f"bifrost.{stage_name}.{index + 1}"
+                )
+                worker.start()
+                self.pipeline_workers.append(worker)
+
+    def _join_pipeline_workers(self):
+        self.compress_queue.join()
+        self.reason_queue.join()
+        self.storage_queue.join()
+
+        for worker in self.pipeline_workers:
+            worker.join(timeout=1.0)
+
+    def run(self):
+        self.log.info("EventRouter started. Bifrost pipeline active.")
+        self._start_pipeline_workers()
+
+        while not SHUTDOWN.is_set() or not self.queue.empty():
+            try:
+                event = self.queue.get(timeout=1.0)
+                self._record_metrics()
+                self._dispatch_event(event)
             except Empty:
                 continue
             except Exception as e:
                 self.log.error(f"EventRouter error: {e}")
 
+        self._join_pipeline_workers()
         if self.conn:
             self.conn.close()
 
