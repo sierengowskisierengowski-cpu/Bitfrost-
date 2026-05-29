@@ -158,7 +158,7 @@ def execute_with_retry(
                 wait_time,
             )
             time.sleep(wait_time)
-            backoff = min(max(backoff * 2, wait_time), backoff_cap)
+            backoff = min(backoff * 2, backoff_cap)
 
     if circuit_breaker:
         circuit_breaker.record_failure()
