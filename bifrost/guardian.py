@@ -27,6 +27,8 @@ from pathlib import Path
 from datetime import datetime, timezone
 from queue import Queue, Empty, Full
 
+from heimdall.schema import Decision as SchemaDecision
+
 BIFROST_VERSION = "0.1.1"
 CONFIG_PATH = Path("~/Projects/bifrost/heimdall_config.json").expanduser()
 DB_PATH = Path("~/Projects/bifrost/db/events.db").expanduser()
@@ -588,24 +590,41 @@ class EventRouter(threading.Thread):
 
             decision = json.loads(raw_decision)
 
-            # Validate required fields
-            required = ["severity", "action_required", "confidence", "reasoning"]
-            for field in required:
-                if field not in decision:
-                    self.log.warning(
-                        f"LLM decision missing field: {field}. Using fallback."
-                    )
-                    return self._safe_fallback(f"missing_field_{field}")
+            if not isinstance(decision, dict):
+                self.log.warning("LLM decision was not a JSON object. Using fallback.")
+                with METRICS_LOCK:
+                    METRICS["llm_errors"] += 1
+                return self._safe_fallback("invalid_decision_object")
 
-            # Clamp confidence
-            decision["confidence"] = max(
-                0.0, min(1.0, float(decision.get("confidence", 0.0)))
+            required = (
+                "severity",
+                "action_required",
+                "confidence",
+                "reasoning",
+                "gjallarhorn_tier",
             )
+            missing = [field for field in required if field not in decision]
+            if missing:
+                self.log.warning(
+                    "LLM decision missing required fields: %s. Using fallback.",
+                    ", ".join(missing)
+                )
+                with METRICS_LOCK:
+                    METRICS["llm_errors"] += 1
+                return self._safe_fallback("missing_required_fields")
+
+            try:
+                validated = SchemaDecision.from_dict(decision)
+            except Exception as e:
+                self.log.error(f"LLM decision validation failed: {e}")
+                with METRICS_LOCK:
+                    METRICS["llm_errors"] += 1
+                return self._safe_fallback("decision_validation_error")
 
             with METRICS_LOCK:
                 METRICS["decisions_made"] += 1
 
-            return decision
+            return validated.to_dict()
 
         except json.JSONDecodeError as e:
             self.log.error(f"LLM returned invalid JSON: {e}")
