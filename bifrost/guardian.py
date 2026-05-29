@@ -637,6 +637,35 @@ class EventRouter(threading.Thread):
             "hardware_tier": self.config.get("hardware_tier", "TIER_4")
         }
 
+    @staticmethod
+    def _normalize_json_text(payload):
+        if payload is None:
+            return None
+
+        if not isinstance(payload, str):
+            return json.dumps(payload)
+
+        text = payload.strip()
+        if not text:
+            return text
+
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return text
+
+        if isinstance(parsed, str):
+            nested = parsed.strip()
+            if not nested:
+                return json.dumps(parsed)
+            try:
+                json.loads(nested)
+            except json.JSONDecodeError:
+                return json.dumps(parsed)
+            return EventRouter._normalize_json_text(nested)
+
+        return json.dumps(parsed)
+
     def store_event(self, event: dict, compressed=None, decision=None) -> int:
         boundary = event.get("boundary", "UNKNOWN")
         source = event.get("source", "unknown")
@@ -655,7 +684,7 @@ class EventRouter(threading.Thread):
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
                 timestamp, source, boundary, raw,
-                compressed if isinstance(compressed, str) else json.dumps(compressed),
+                self._normalize_json_text(compressed),
                 json.dumps(decision) if decision else None,
                 action
             ))
