@@ -21,12 +21,12 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+from bifrost.paths import alert_sound_path, breach_sound_path
+
 log = logging.getLogger("heimdall.gjallarhorn")
 
 QUIET_HOURS_START = 23
 QUIET_HOURS_END = 7
-ALERT_SOUND = Path("~/Projects/bifrost/gjallarhorn/alert.wav").expanduser()
-BREACH_SOUND = Path("~/Projects/bifrost/gjallarhorn/breach.wav").expanduser()
 
 
 def is_quiet_hours() -> bool:
@@ -165,9 +165,9 @@ def alert(tier: int, decision: dict, config: dict):
 
         # Audio — always plays on breach regardless of quiet hours
         if severity == "CRITICAL":
-            play_sound(BREACH_SOUND)
+            play_sound(breach_sound_path())
         else:
-            play_sound(ALERT_SOUND)
+            play_sound(alert_sound_path())
 
         log.warning(
             f"Tier 2 BREACH ALERT fired. "
@@ -183,7 +183,9 @@ def morning_report(config: dict) -> str:
     Covers everything that happened during quiet hours.
     """
     import sqlite3
-    db_path = Path("~/Projects/bifrost/db/events.db").expanduser()
+    from bifrost.paths import db_path as resolve_db_path
+
+    db_path = resolve_db_path(config)
 
     if not db_path.exists():
         return "No events database found."

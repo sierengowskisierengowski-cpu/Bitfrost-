@@ -138,8 +138,8 @@ class MQTTClientManager:
             try:
                 self._client.loop_stop()
                 self._client.disconnect()
-            except Exception:
-                pass
+            except Exception as ex:
+                log.debug("MQTT disconnect cleanup: %s", ex)
         self._connected = False
 
 

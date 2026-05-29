@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from queue import Queue
 
+from bifrost.event_queue import safe_enqueue
+
 log = logging.getLogger("heimdall.ingest")
 
 
@@ -97,19 +99,23 @@ class IngestHandler(BaseHTTPRequestHandler):
                     datetime.now(timezone.utc).isoformat()
                 )
 
-            # Feed into guardian event queue
             if self.event_queue:
-                try:
-                    self.event_queue.put_nowait(envelope)
+                if safe_enqueue(
+                    self.event_queue,
+                    envelope,
+                    envelope.get("source", "ingest"),
+                    log,
+                ):
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
                     self.end_headers()
                     self.wfile.write(b'{"status":"queued"}')
                     log.debug(
-                        f"Ingest: [{envelope['boundary']}] "
-                        f"{envelope['source']} event queued."
+                        "Ingest: [%s] %s event queued.",
+                        envelope["boundary"],
+                        envelope["source"],
                     )
-                except Exception:
+                else:
                     self.send_response(503)
                     self.send_header("Content-Type", "application/json")
                     self.end_headers()

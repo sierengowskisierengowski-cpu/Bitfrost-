@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from queue import Queue
 
-from bifrost.guardian import AuditdCollector, SHUTDOWN
+from bifrost.guardian import AuditdCollector, COLLECTOR_STOP
 
 
 def _append_line(path: Path, line: str):
@@ -23,7 +23,7 @@ def test_auditd_collector_reopens_after_rotation(tmp_path, monkeypatch):
 
     q = Queue()
     log = logging.getLogger("test.auditd.rotation")
-    SHUTDOWN.clear()
+    COLLECTOR_STOP.clear()
 
     collector = AuditdCollector(q, log)
     collector.start()
@@ -45,6 +45,6 @@ def test_auditd_collector_reopens_after_rotation(tmp_path, monkeypatch):
         assert second["raw"] == second_line
         assert q.empty()
     finally:
-        SHUTDOWN.set()
+        COLLECTOR_STOP.set()
         collector.join(timeout=2)
-        SHUTDOWN.clear()
+        COLLECTOR_STOP.clear()

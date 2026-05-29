@@ -16,3 +16,7 @@
 2026-05-28 23:48:01,317 [INFO] heimdall.guardian — EventRouter started. Bifrost pipeline active.
 2026-05-28 23:48:01,317 [INFO] heimdall.guardian — Bifrost pipeline active.
 2026-05-28 23:48:01,317 [INFO] heimdall.guardian — Heimdall is online. The bridge is watched.
+2026-05-29 11:02:40,569 [INFO] heimdall.guardian — Bifrost: 100 events processed.
+2026-05-29 13:42:07,448 [INFO] heimdall.guardian — Shutting down...
+2026-05-29 13:42:07,778 [INFO] heimdall.ingest — Ingest server stopped.
+2026-05-29 13:42:09,455 [INFO] heimdall.guardian — Heimdall shutdown complete.

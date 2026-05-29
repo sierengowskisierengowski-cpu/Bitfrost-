@@ -318,17 +318,20 @@ def generate_config(tier, analyst_model, extractor_model, ollama_ok, paths):
         ]
     }
 
-    config_path = Path("~/Projects/bifrost/heimdall_config.json").expanduser()
-    with open(config_path, "w") as f:
+    from bifrost.paths import config_checksum_path, config_path
+
+    cfg = config_path()
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    with open(cfg, "w") as f:
         json.dump(config, f, indent=2)
 
-    checksum = hashlib.sha256(config_path.read_bytes()).hexdigest()
+    checksum = hashlib.sha256(cfg.read_bytes()).hexdigest()
 
-    checksum_path = Path("~/Projects/bifrost/heimdall_config.sha256").expanduser()
-    with open(checksum_path, "w") as f:
+    checksum_file = config_checksum_path()
+    with open(checksum_file, "w") as f:
         f.write(checksum)
 
-    print(f"[+] heimdall_config.json written.")
+    print(f"[+] heimdall_config.json written to {cfg}.")
     print(f"[+] Integrity hash: {checksum[:16]}...")
 
 

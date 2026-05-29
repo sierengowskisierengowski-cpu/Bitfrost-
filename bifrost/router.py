@@ -10,6 +10,7 @@ Manages the full fallback chain:
 
 import json
 import logging
+import os
 import urllib.request
 import urllib.error
 from typing import Optional
@@ -64,12 +65,17 @@ def execute_decision(
         "schema_version": decision.get("schema_version", "1.0.0")
     }
 
+    headers = {"Content-Type": "application/json"}
+    token = os.getenv("BIFROST_EXECUTOR_TOKEN", "")
+    if token:
+        headers["X-Bifrost-Token"] = token
+
     try:
         data = json.dumps(payload).encode()
         req = urllib.request.Request(
             EXECUTOR_URL,
             data=data,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST"
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -99,12 +105,17 @@ def rollback_last_action(action_id: int, log_ref) -> bool:
         log_ref.warning("Router: executor not available for rollback.")
         return False
 
+    headers = {"Content-Type": "application/json"}
+    token = os.getenv("BIFROST_EXECUTOR_TOKEN", "")
+    if token:
+        headers["X-Bifrost-Token"] = token
+
     try:
         payload = json.dumps({"action_id": action_id}).encode()
         req = urllib.request.Request(
             rollback_url,
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST"
         )
         with urllib.request.urlopen(req, timeout=5) as resp:

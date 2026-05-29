@@ -16,18 +16,18 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-log = logging.getLogger("heimdall.dashboard")
+from bifrost.paths import db_path as resolve_db_path
 
-DB_PATH = Path("~/Projects/bifrost/db/events.db").expanduser()
+log = logging.getLogger("heimdall.dashboard")
 DASHBOARD_HOST = "127.0.0.1"
 DASHBOARD_PORT = 8080
 
 
 def _query(sql: str, params: tuple = ()) -> list:
-    if not DB_PATH.exists():
+    if not resolve_db_path().exists():
         return []
     try:
-        with sqlite3.connect(str(DB_PATH)) as conn:
+        with sqlite3.connect(str(resolve_db_path())) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute(sql, params)
@@ -38,10 +38,10 @@ def _query(sql: str, params: tuple = ()) -> list:
 
 
 def get_stats() -> dict:
-    if not DB_PATH.exists():
+    if not resolve_db_path().exists():
         return {}
     try:
-        with sqlite3.connect(str(DB_PATH)) as conn:
+        with sqlite3.connect(str(resolve_db_path())) as conn:
             c = conn.cursor()
             c.execute("SELECT COUNT(*) FROM events")
             total = c.fetchone()[0]

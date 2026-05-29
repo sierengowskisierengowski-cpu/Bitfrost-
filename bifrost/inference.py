@@ -10,14 +10,14 @@ entire event processing pipeline.
 """
 
 from __future__ import annotations
+
 import logging
-import time
 import threading
-from typing import Callable, Any, Optional
+import time
+from typing import Any, Callable, Optional
 
 log = logging.getLogger("heimdall.inference")
 
-# Timeout per hardware tier in seconds
 TIER_TIMEOUTS = {
     "TIER_1": 60.0,
     "TIER_2": 45.0,
@@ -30,154 +30,145 @@ MAX_RETRIES = 2
 RETRY_DELAY = 1.0
 
 
-def get_request_timeout(hardware_tier: str = "TIER_4") -> float:
-    """Returns the appropriate timeout for the hardware tier."""
-    return TIER_TIMEOUTS.get(hardware_tier, DEFAULT_TIMEOUT)
+def get_request_timeout(config: Any = "TIER_4") -> float:
+    """Return request timeout from config dict or hardware tier string."""
+    if isinstance(config, dict):
+        if "llm_timeout_seconds" in config:
+            return float(config["llm_timeout_seconds"])
+        tier = config.get("hardware_tier", "TIER_4")
+        return TIER_TIMEOUTS.get(tier, DEFAULT_TIMEOUT)
+    if isinstance(config, str):
+        return TIER_TIMEOUTS.get(config, DEFAULT_TIMEOUT)
+    return DEFAULT_TIMEOUT
 
 
 class CircuitBreaker:
     """
     Circuit breaker for LLM inference calls.
 
-    States:
-      CLOSED  — normal operation, calls go through
-      OPEN    — too many failures, calls blocked
-      HALF    — testing if service recovered
-
-    Prevents a failing model from blocking the pipeline.
-    Falls back to deterministic rules when open.
+    Uses monotonic open_until timestamp. When open, calls are skipped
+    and execute_with_retry returns (None, "circuit_open").
     """
-
-    CLOSED = "CLOSED"
-    OPEN = "OPEN"
-    HALF = "HALF"
 
     def __init__(
         self,
-        name: str,
+        name: str = "",
         failure_threshold: int = 5,
         recovery_timeout: float = 60.0,
     ):
-        self.name = name
+        self.name = name or "unnamed"
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
         self.failure_count = 0
-        self.last_failure_time = 0.0
-        self.state = self.CLOSED
+        self.open_until = 0.0
         self._lock = threading.Lock()
 
-    def call(self, fn: Callable, *args, **kwargs) -> Any:
-        """
-        Execute fn through the circuit breaker.
-        Returns None if circuit is open.
-        """
-        with self._lock:
-            if self.state == self.OPEN:
-                elapsed = time.time() - self.last_failure_time
-                if elapsed >= self.recovery_timeout:
-                    self.state = self.HALF
-                    log.info(
-                        f"CircuitBreaker {self.name}: HALF-OPEN, testing..."
-                    )
-                else:
-                    log.warning(
-                        f"CircuitBreaker {self.name}: OPEN. "
-                        f"Skipping call. {self.recovery_timeout - elapsed:.0f}s until retry."
-                    )
-                    return None
-
-        try:
-            result = fn(*args, **kwargs)
-            with self._lock:
-                if self.state == self.HALF:
-                    log.info(
-                        f"CircuitBreaker {self.name}: recovered. CLOSED."
-                    )
-                self.state = self.CLOSED
-                self.failure_count = 0
-            return result
-
-        except Exception as e:
-            with self._lock:
-                self.failure_count += 1
-                self.last_failure_time = time.time()
-                log.warning(
-                    f"CircuitBreaker {self.name}: failure "
-                    f"{self.failure_count}/{self.failure_threshold}: {e}"
-                )
-                if self.failure_count >= self.failure_threshold:
-                    self.state = self.OPEN
-                    log.error(
-                        f"CircuitBreaker {self.name}: OPEN. "
-                        f"Too many failures. Falling back to rules."
-                    )
-            return None
+    def _apply_config(self, config: dict) -> None:
+        if "llm_circuit_breaker_failures" in config:
+            self.failure_threshold = int(config["llm_circuit_breaker_failures"])
+        if "llm_circuit_breaker_reset_seconds" in config:
+            self.recovery_timeout = float(config["llm_circuit_breaker_reset_seconds"])
 
     def is_open(self) -> bool:
-        return self.state == self.OPEN
+        return time.monotonic() < self.open_until
 
-    def reset(self):
+    def _record_success(self) -> None:
         with self._lock:
-            self.state = self.CLOSED
             self.failure_count = 0
-            self.last_failure_time = 0.0
-        log.info(f"CircuitBreaker {self.name}: manually reset.")
+            self.open_until = 0.0
+
+    def _record_failure(self, logger: logging.Logger) -> None:
+        with self._lock:
+            self.failure_count += 1
+            if self.failure_count >= self.failure_threshold:
+                self.open_until = time.monotonic() + self.recovery_timeout
+                logger.error(
+                    "CircuitBreaker %s: OPEN after %d failures. "
+                    "Retry in %.0fs.",
+                    self.name,
+                    self.failure_count,
+                    self.recovery_timeout,
+                )
+
+    def reset(self) -> None:
+        with self._lock:
+            self.failure_count = 0
+            self.open_until = 0.0
+        log.info("CircuitBreaker %s: manually reset.", self.name)
 
     def get_status(self) -> dict:
         return {
             "name": self.name,
-            "state": self.state,
+            "open": self.is_open(),
             "failure_count": self.failure_count,
             "failure_threshold": self.failure_threshold,
+            "open_until": self.open_until,
         }
 
 
 def execute_with_retry(
-    fn: Callable,
-    *args,
-    max_retries: int = MAX_RETRIES,
-    delay: float = RETRY_DELAY,
+    fn: Callable[[], Any],
+    *,
+    provider: str = "",
+    config: Optional[dict] = None,
+    logger: Optional[logging.Logger] = None,
     circuit_breaker: Optional[CircuitBreaker] = None,
-    **kwargs,
-) -> Any:
+    **_ignored,
+) -> tuple[Any, Optional[str]]:
     """
     Execute fn with retry and optional circuit breaker.
 
-    Retries up to max_retries times with delay between attempts.
-    If circuit_breaker is provided uses it to track failures.
-    Returns None if all retries fail.
+    Returns (result, error_code). error_code is None on success,
+    "circuit_open" when the breaker blocks the call, or "llm_error"
+    when all attempts fail.
     """
-    if circuit_breaker:
-        return circuit_breaker.call(
-            _retry_loop, fn, *args,
-            max_retries=max_retries,
-            delay=delay,
-            **kwargs
-        )
-    return _retry_loop(fn, *args, max_retries=max_retries, delay=delay, **kwargs)
+    config = config or {}
+    logger = logger or log
 
+    max_retries = int(config.get("llm_retry_attempts", MAX_RETRIES))
+    attempts = max(1, max_retries + 1)
+    delay = float(config.get("llm_retry_backoff_seconds", RETRY_DELAY))
+    max_backoff = float(config.get("llm_retry_max_backoff_seconds", max(delay, RETRY_DELAY)))
 
-def _retry_loop(
-    fn: Callable,
-    *args,
-    max_retries: int = MAX_RETRIES,
-    delay: float = RETRY_DELAY,
-    **kwargs,
-) -> Any:
-    last_error = None
-    for attempt in range(1, max_retries + 1):
+    if circuit_breaker is not None:
+        circuit_breaker._apply_config(config)
+        if circuit_breaker.is_open():
+            logger.warning(
+                "CircuitBreaker %s: OPEN. Skipping %s call.",
+                circuit_breaker.name,
+                provider or "inference",
+            )
+            return None, "circuit_open"
+
+    last_error: Optional[Exception] = None
+    for attempt in range(1, attempts + 1):
         try:
-            return fn(*args, **kwargs)
-        except Exception as e:
-            last_error = e
-            if attempt < max_retries:
-                log.warning(
-                    f"Attempt {attempt}/{max_retries} failed: {e}. "
-                    f"Retrying in {delay}s..."
+            result = fn()
+            if circuit_breaker is not None:
+                circuit_breaker._record_success()
+            return result, None
+        except Exception as exc:
+            last_error = exc
+            if circuit_breaker is not None:
+                circuit_breaker._record_failure(logger)
+
+            if attempt < attempts:
+                sleep_for = min(delay * attempt, max_backoff)
+                logger.warning(
+                    "Attempt %d/%d failed for %s: %s. Retrying in %.2fs.",
+                    attempt,
+                    attempts,
+                    provider or "inference",
+                    exc,
+                    sleep_for,
                 )
-                time.sleep(delay)
+                time.sleep(sleep_for)
             else:
-                log.error(
-                    f"All {max_retries} attempts failed. Last error: {e}"
+                logger.error(
+                    "All %d attempts failed for %s. Last error: %s",
+                    attempts,
+                    provider or "inference",
+                    exc,
                 )
-    return None
+
+    return None, "llm_error" if last_error else "llm_error"

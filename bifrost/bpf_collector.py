@@ -18,6 +18,8 @@ import threading
 from datetime import datetime, timezone
 from queue import Queue
 
+from bifrost.event_queue import safe_enqueue
+
 log = logging.getLogger("heimdall.bpf_collector")
 
 try:
@@ -84,12 +86,12 @@ class BPFCollector(threading.Thread):
                 }
             }
             
-            # Send to Guardian's event queue
-            try:
-                self.queue.put_nowait(guardian_event)
-            except Exception:
-                # Queue full - drop event (prevents blocking kernel)
-                pass
+            safe_enqueue(
+                self.queue,
+                guardian_event,
+                "ebpf",
+                self.log,
+            )
                 
         except Exception as e:
             self.log.warning(f"Event parsing error: {e}")

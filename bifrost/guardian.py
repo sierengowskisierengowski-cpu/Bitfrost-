@@ -25,25 +25,37 @@ import threading
 import ipaddress
 from pathlib import Path
 from datetime import datetime, timezone
-from queue import Queue, Empty, Full
+from queue import Queue, Empty
+
+from bifrost.event_queue import METRICS, METRICS_LOCK, safe_enqueue
+from bifrost.inference import CircuitBreaker, execute_with_retry, get_request_timeout
+from bifrost import paths as bifrost_paths
 
 BIFROST_VERSION = "0.1.1"
-CONFIG_PATH = Path("~/Projects/bifrost/heimdall_config.json").expanduser()
-DB_PATH = Path("~/Projects/bifrost/db/events.db").expanduser()
-LOG_PATH = Path("~/Projects/bifrost/db/guardian.log").expanduser()
+
+
+def refresh_runtime_paths(config=None):
+    """Resolve paths from env vars and optional config."""
+    global CONFIG_PATH, DB_PATH, LOG_PATH
+    CONFIG_PATH = bifrost_paths.config_path(config)
+    DB_PATH = bifrost_paths.db_path(config)
+    LOG_PATH = bifrost_paths.log_path(config)
+
+
+refresh_runtime_paths()
 
 EVENT_QUEUE = Queue(maxsize=10000)
 SHUTDOWN = threading.Event()
+COLLECTOR_STOP = threading.Event()
 
-METRICS_LOCK = threading.Lock()
-METRICS = {
-    "events_received": 0,
-    "events_dropped": 0,
-    "decisions_made": 0,
-    "llm_errors": 0,
-    "fallbacks": 0,
-    "queue_full_count": 0,
-}
+METRICS.setdefault("decisions_made", 0)
+METRICS.setdefault("llm_errors", 0)
+METRICS.setdefault("fallbacks", 0)
+METRICS.setdefault("policy_blocks", 0)
+METRICS.setdefault("actions_dispatched", 0)
+
+COMPRESSED_EVENT_NORMALIZE_DEPTH = 3
+COMPRESSED_EVENT_BACKFILL_BATCH_SIZE = 500
 
 
 def setup_logging():
@@ -60,6 +72,11 @@ def setup_logging():
 
 
 def load_config():
+    log = logging.getLogger("heimdall.guardian")
+    production_mode = (
+        os.getenv("HEIMDALL_ENV", "production").strip().lower() == "production"
+    )
+
     if not CONFIG_PATH.exists():
         print("[!] heimdall_config.json not found.")
         print("[!] Run python setup.py first.")
@@ -70,20 +87,26 @@ def load_config():
 
     checksum_path = CONFIG_PATH.with_suffix(".sha256")
     if not checksum_path.exists():
-        print("[!] CRITICAL: Config checksum file missing.")
-        print("[!] heimdall_config.sha256 not found.")
-        print("[!] Run python setup.py to regenerate config and checksum.")
-        print("[!] This is required to prevent tampered config from loading.")
-        sys.exit(1)
+        if production_mode:
+            log.critical("CRITICAL: Config checksum file missing: %s", checksum_path)
+            log.critical(
+                "Refusing startup in production mode without config integrity verification."
+            )
+            sys.exit(1)
+        log.warning(
+            "Config checksum file missing; skipping integrity verification "
+            "in non-production mode."
+        )
+        return config
+
     import hashlib
     actual = hashlib.sha256(CONFIG_PATH.read_bytes()).hexdigest()
     expected = checksum_path.read_text().strip()
     if actual != expected:
-        print("[!] CRITICAL: Config checksum mismatch.")
-        print("[!] heimdall_config.json may have been tampered with.")
-        print("[!] Run python setup.py to regenerate.")
+        log.critical("CRITICAL: Config checksum mismatch.")
+        log.critical("heimdall_config.json may have been tampered with.")
         sys.exit(1)
-    print("[+] Config integrity verified.")
+    log.info("Config integrity verified.")
 
     return config
 
@@ -146,9 +169,68 @@ def init_database():
             ON actions(event_id);
     """)
 
+    _normalize_compressed_event_rows(conn)
+
     conn.commit()
     conn.close()
     return str(DB_PATH)
+
+
+def _normalize_compressed_event(value):
+    if value is None:
+        return None
+
+    if not isinstance(value, str):
+        return json.dumps(value)
+
+    normalized = value
+    for _ in range(COMPRESSED_EVENT_NORMALIZE_DEPTH):
+        try:
+            decoded = json.loads(normalized)
+        except json.JSONDecodeError:
+            return normalized
+
+        if isinstance(decoded, str):
+            stripped = decoded.strip()
+            if stripped.startswith("{") or stripped.startswith("["):
+                normalized = stripped
+                continue
+            return normalized
+
+        if isinstance(decoded, (dict, list)):
+            return json.dumps(decoded)
+
+        return normalized
+
+    return normalized
+
+
+def _normalize_compressed_event_rows(conn):
+    read_cursor = conn.cursor()
+    read_cursor.execute("""
+        SELECT id, compressed_event
+        FROM events
+        WHERE compressed_event IS NOT NULL
+    """)
+    update_cursor = conn.cursor()
+
+    while True:
+        rows = read_cursor.fetchmany(COMPRESSED_EVENT_BACKFILL_BATCH_SIZE)
+        if not rows:
+            return
+
+        updates = []
+        for event_id, compressed_event in rows:
+            normalized = _normalize_compressed_event(compressed_event)
+            if normalized != compressed_event:
+                updates.append((normalized, event_id))
+
+        if updates:
+            update_cursor.executemany("""
+                UPDATE events
+                SET compressed_event = ?
+                WHERE id = ?
+            """, updates)
 
 
 def banner(config):
@@ -172,34 +254,9 @@ def banner(config):
 """)
 
 
-def safe_enqueue(queue: Queue, event: dict, source: str, log) -> bool:
-    """
-    Enqueue with bounded retry and drop metrics.
-    Never silently drops — always logs and counts.
-    """
-    for attempt in range(3):
-        try:
-            queue.put(event, timeout=0.2)
-            with METRICS_LOCK:
-                METRICS["events_received"] += 1
-            return True
-        except Full:
-            if attempt == 2:
-                with METRICS_LOCK:
-                    METRICS["events_dropped"] += 1
-                    METRICS["queue_full_count"] += 1
-                log.error(
-                    f"EVENT_QUEUE full after 3 attempts. "
-                    f"Dropping event source={source}. "
-                    f"Total dropped={METRICS['events_dropped']}"
-                )
-                return False
-            time.sleep(0.05)
-    return False
-
-
 class AuditdCollector(threading.Thread):
     AUDIT_LOG = Path("/var/log/audit/audit.log")
+    RETRY_INTERVAL = 0.5
 
     def __init__(self, queue, log):
         super().__init__(daemon=True, name="collector.auditd")
@@ -208,68 +265,83 @@ class AuditdCollector(threading.Thread):
 
     def run(self):
         self.log.info("AuditdCollector started.")
-        if not self.AUDIT_LOG.exists():
-            self.log.warning("auditd log not found. Is auditd running?")
-            return
+        warned_missing = False
 
-        try:
-            with open(self.AUDIT_LOG, "r") as f:
-                f.seek(0, 2)
-                inode = os.stat(self.AUDIT_LOG).st_ino
-                while not SHUTDOWN.is_set():
-                    try:
-                        # Detect log rotation
-                        current_inode = os.stat(self.AUDIT_LOG).st_ino
-                        if current_inode != inode:
-                            self.log.info("auditd log rotated. Reopening.")
+        while not COLLECTOR_STOP.is_set():
+            if not self.AUDIT_LOG.exists():
+                if not warned_missing:
+                    self.log.warning("auditd log not found. Is auditd running?")
+                    warned_missing = True
+                if COLLECTOR_STOP.wait(self.RETRY_INTERVAL):
+                    break
+                continue
+
+            warned_missing = False
+            try:
+                with open(self.AUDIT_LOG, "r") as f:
+                    f.seek(0, 2)
+                    inode = os.fstat(f.fileno()).st_ino
+
+                    while not COLLECTOR_STOP.is_set():
+                        try:
+                            current_inode = os.stat(self.AUDIT_LOG).st_ino
+                            if current_inode != inode:
+                                self.log.info("auditd log rotated. Reopening.")
+                                break
+                        except OSError:
+                            self.log.info("auditd log unavailable. Reopening.")
                             break
-                    except OSError:
-                        break
 
-                    line = f.readline()
-                    if not line:
-                        time.sleep(0.1)
-                        continue
-                    if any(key in line for key in [
-                        "execve", "EXECVE", "USER_AUTH",
-                        "USER_LOGIN", "SYSCALL", "key=exec"
-                    ]):
-                        event = {
-                            "source": "auditd",
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                            "boundary": "HOST",
-                            "raw": line.strip()
-                        }
-                        safe_enqueue(self.queue, event, "auditd", self.log)
-        except OSError as e:
-            self.log.error(f"AuditdCollector file error: {e}")
-        except Exception as e:
-            self.log.error(f"AuditdCollector unexpected error: {e}")
+                        line = f.readline()
+                        if not line:
+                            if COLLECTOR_STOP.wait(0.1):
+                                break
+                            continue
+
+                        if any(key in line for key in [
+                            "execve", "EXECVE", "USER_AUTH",
+                            "USER_LOGIN", "SYSCALL", "key=exec"
+                        ]):
+                            event = {
+                                "source": "auditd",
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "boundary": "HOST",
+                                "raw": line.strip()
+                            }
+                            safe_enqueue(self.queue, event, "auditd", self.log)
+            except OSError as e:
+                if COLLECTOR_STOP.is_set():
+                    break
+                self.log.error(f"AuditdCollector file error: {e}")
+                if COLLECTOR_STOP.wait(self.RETRY_INTERVAL):
+                    break
+            except Exception as e:
+                self.log.error(f"AuditdCollector unexpected error: {e}")
+                break
 
 
 class HoneypotLogCollector(threading.Thread):
-    COWRIE_LOG = Path(
-        "~/Projects/honeypot/logs/cowrie/cowrie.json"
-    ).expanduser()
 
-    def __init__(self, queue, log):
+    def __init__(self, queue, log, cowrie_log=None):
         super().__init__(daemon=True, name="collector.cowrie")
         self.queue = queue
         self.log = log
+        self.cowrie_log = cowrie_log or bifrost_paths.cowrie_log_path()
 
     def run(self):
         self.log.info("HoneypotLogCollector started.")
-        if not self.COWRIE_LOG.exists():
-            self.log.warning(f"Cowrie log not found at {self.COWRIE_LOG}")
+        if not self.cowrie_log.exists():
+            self.log.warning(f"Cowrie log not found at {self.cowrie_log}")
             return
 
         try:
-            with open(self.COWRIE_LOG, "r") as f:
+            with open(self.cowrie_log, "r") as f:
                 f.seek(0, 2)
-                while not SHUTDOWN.is_set():
+                while not COLLECTOR_STOP.is_set():
                     line = f.readline()
                     if not line:
-                        time.sleep(0.1)
+                        if COLLECTOR_STOP.wait(0.1):
+                            break
                         continue
                     try:
                         entry = json.loads(line.strip())
@@ -301,7 +373,7 @@ class ProcessWatcher(threading.Thread):
 
     def run(self):
         self.log.info("ProcessWatcher started.")
-        while not SHUTDOWN.is_set():
+        while not COLLECTOR_STOP.is_set():
             try:
                 for pid_dir in Path("/proc").glob("[0-9]*"):
                     try:
@@ -376,7 +448,7 @@ class ProcessWatcher(threading.Thread):
                 except OSError as e:
                     self.log.warning(f"ProcessWatcher PID scan error: {e}")
 
-                SHUTDOWN.wait(self.POLL_INTERVAL)
+                COLLECTOR_STOP.wait(self.POLL_INTERVAL)
 
             except Exception as e:
                 self.log.error(f"ProcessWatcher loop error: {e}")
@@ -396,12 +468,12 @@ class NetworkWatcher(threading.Thread):
 
     def run(self):
         self.log.info("NetworkWatcher started.")
-        while not SHUTDOWN.is_set():
+        while not COLLECTOR_STOP.is_set():
             try:
                 self.scan_connections()
             except Exception as e:
                 self.log.error(f"NetworkWatcher scan error: {e}")
-            time.sleep(self.POLL_INTERVAL)
+            COLLECTOR_STOP.wait(self.POLL_INTERVAL)
 
     def hex_to_ip(self, hex_ip: str) -> str:
         try:
@@ -465,7 +537,6 @@ class NetworkWatcher(threading.Thread):
 
 
 class EventRouter(threading.Thread):
-    LLM_TIMEOUT = 30.0
 
     def __init__(self, queue, config, db_path, log):
         super().__init__(daemon=True, name="bifrost.router")
@@ -475,6 +546,8 @@ class EventRouter(threading.Thread):
         self.log = log
         self.event_count = 0
         self.conn = None
+        self.extractor_breaker = CircuitBreaker("guardian_extractor")
+        self.analyst_breaker = CircuitBreaker("guardian_analyst")
         self.setup_inference_clients()
         self.setup_db()
 
@@ -484,20 +557,30 @@ class EventRouter(threading.Thread):
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.execute("PRAGMA busy_timeout=5000")
 
+    def flush_db(self):
+        if not self.conn:
+            return
+        try:
+            self.conn.commit()
+            self.conn.execute("PRAGMA wal_checkpoint(FULL)")
+        except sqlite3.Error as e:
+            self.log.warning(f"DB flush error during shutdown: {e}")
+
     def setup_inference_clients(self):
         try:
             from openai import OpenAI
+            timeout = get_request_timeout(self.config)
             if self.config.get("use_local_llm"):
                 self.analyst_client = OpenAI(
                     base_url=self.config["local_url"],
                     api_key="ollama",
-                    timeout=self.LLM_TIMEOUT
+                    timeout=timeout,
                 )
                 self.analyst_model = self.config["analyst_model"]
                 self.extractor_client = OpenAI(
                     base_url=self.config["local_url"],
                     api_key="ollama",
-                    timeout=self.LLM_TIMEOUT
+                    timeout=timeout,
                 )
                 self.extractor_model = self.config["extractor_model"]
             else:
@@ -505,7 +588,7 @@ class EventRouter(threading.Thread):
                 self.analyst_client = OpenAI(
                     base_url=self.config.get("groq_url", ""),
                     api_key=api_key,
-                    timeout=self.LLM_TIMEOUT
+                    timeout=timeout,
                 )
                 self.analyst_model = self.config.get("groq_model", "")
                 self.extractor_client = None
@@ -522,21 +605,37 @@ class EventRouter(threading.Thread):
 
         try:
             raw = json.dumps(event.get("raw", {}))
-            response = self.extractor_client.chat.completions.create(
-                model=self.extractor_model,
-                temperature=0.0,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a security event compressor. "
-                            "Strip hex addresses and register states. "
-                            "Return compact JSON only. No explanation."
-                        )
-                    },
-                    {"role": "user", "content": raw}
-                ]
+            response, error = execute_with_retry(
+                lambda: self.extractor_client.chat.completions.create(
+                    model=self.extractor_model,
+                    temperature=0.0,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a security event compressor. "
+                                "Strip hex addresses and register states. "
+                                "Return compact JSON only. No explanation."
+                            ),
+                        },
+                        {"role": "user", "content": raw},
+                    ],
+                ),
+                provider="guardian_extractor",
+                config=self.config,
+                logger=self.log,
+                circuit_breaker=self.extractor_breaker,
             )
+            if not response:
+                reason = (
+                    "extractor_circuit_open"
+                    if error == "circuit_open"
+                    else "extractor_error"
+                )
+                self.log.warning("Extractor degraded mode: %s", reason)
+                with METRICS_LOCK:
+                    METRICS["llm_errors"] += 1
+                return json.dumps(event.get("raw", {}))[:500]
             return response.choices[0].message.content.strip()
         except Exception as e:
             self.log.warning(f"Extractor error: {e}. Using raw fallback.")
@@ -550,17 +649,32 @@ class EventRouter(threading.Thread):
 
         try:
             baseline = self.config.get("system_baseline", "")
-            response = self.analyst_client.chat.completions.create(
-                model=self.analyst_model,
-                temperature=0.0,
-                messages=[
-                    {"role": "system", "content": baseline},
-                    {
-                        "role": "user",
-                        "content": f"Analyze this security event as JSON:\n{compressed}"
-                    }
-                ]
+            response, error = execute_with_retry(
+                lambda: self.analyst_client.chat.completions.create(
+                    model=self.analyst_model,
+                    temperature=0.0,
+                    messages=[
+                        {"role": "system", "content": baseline},
+                        {
+                            "role": "user",
+                            "content": (
+                                f"Analyze this security event as JSON:\n{compressed}"
+                            ),
+                        },
+                    ],
+                ),
+                provider="guardian_analyst",
+                config=self.config,
+                logger=self.log,
+                circuit_breaker=self.analyst_breaker,
             )
+            if not response:
+                with METRICS_LOCK:
+                    METRICS["llm_errors"] += 1
+                if error == "circuit_open":
+                    return self._safe_fallback("analyst_circuit_open")
+                return self._safe_fallback("llm_error")
+
             raw_decision = response.choices[0].message.content.strip()
 
             # Strip markdown fences if present
@@ -570,19 +684,26 @@ class EventRouter(threading.Thread):
 
             decision = json.loads(raw_decision)
 
-            # Validate required fields
-            required = ["severity", "action_required", "confidence", "reasoning"]
+            required = [
+                "severity", "action_required", "confidence", "reasoning",
+                "incident_detected", "boundary", "threat_class",
+            ]
             for field in required:
                 if field not in decision:
                     self.log.warning(
-                        f"LLM decision missing field: {field}. Using fallback."
+                        "LLM decision missing field: %s. Using fallback.", field
                     )
                     return self._safe_fallback(f"missing_field_{field}")
 
-            # Clamp confidence
-            decision["confidence"] = max(
-                0.0, min(1.0, float(decision.get("confidence", 0.0)))
-            )
+            try:
+                from heimdall.schema import validate_decision_dict
+                validated = validate_decision_dict(decision)
+                decision = validated.to_dict()
+            except Exception as schema_err:
+                self.log.warning(
+                    "LLM decision schema validation failed: %s", schema_err
+                )
+                return self._safe_fallback("schema_validation_error")
 
             with METRICS_LOCK:
                 METRICS["decisions_made"] += 1
@@ -619,6 +740,166 @@ class EventRouter(threading.Thread):
             "hardware_tier": self.config.get("hardware_tier", "TIER_4")
         }
 
+    def apply_policy_gate(self, decision: dict, event: dict) -> dict:
+        """Run destructive actions through the policy gate before dispatch."""
+        from bifrost.policy import (
+            Decision as PolicyDecision,
+            ActionType as PolicyActionType,
+            evaluate_policy,
+            SAFE_DEFAULTS,
+            DESTRUCTIVE,
+        )
+
+        decision = dict(decision)
+        requested = decision.get("action_required", "NONE")
+        decision["action_requested"] = requested
+
+        try:
+            action_type = PolicyActionType(requested)
+        except ValueError:
+            action_type = PolicyActionType.LOG
+            requested = action_type.value
+
+        if action_type not in DESTRUCTIVE:
+            decision["action_effective"] = requested
+            decision["policy_allowed"] = True
+            return decision
+
+        target = decision.get("target") or ""
+        pid = None
+        dest_ip = None
+        process_name = None
+
+        if isinstance(target, int):
+            pid = target
+        elif isinstance(target, str) and target:
+            if target.isdigit():
+                pid = int(target)
+            elif target.startswith("pid:"):
+                try:
+                    pid = int(target.split(":")[1])
+                except (ValueError, IndexError) as err:
+                    self.log.debug("Policy: unparsable pid target: %s", err)
+            elif "/" not in target and "." in target:
+                dest_ip = target
+            elif "/" in target:
+                process_name = Path(target).name
+
+        raw = event.get("raw", {})
+        if pid is None and isinstance(raw, dict) and raw.get("pid") is not None:
+            try:
+                pid = int(raw["pid"])
+            except (TypeError, ValueError) as err:
+                self.log.debug("Policy: unparsable raw pid: %s", err)
+
+        learning_mode = self.config.get(
+            "learning_mode", SAFE_DEFAULTS["learning_mode"]
+        )
+        dry_run = self.config.get("dry_run", SAFE_DEFAULTS["dry_run"])
+        autonomous_enabled = self.config.get(
+            "autonomous_actions_enabled",
+            self.config.get(
+                "autonomous_enabled", SAFE_DEFAULTS["autonomous_enabled"]
+            ),
+        )
+
+        result = evaluate_policy(
+            PolicyDecision(
+                action=action_type,
+                confidence=float(decision.get("confidence", 0.0)),
+                reason=str(decision.get("reasoning", "")),
+                pid=pid,
+                process_name=process_name,
+                destination_ip=dest_ip,
+                is_system_process=False,
+                evidence_count=int(decision.get("evidence_count", 2) or 2),
+                event_window_seconds=int(
+                    decision.get("event_window_seconds", 60)
+                ),
+            ),
+            learning_mode=learning_mode,
+            dry_run=dry_run,
+            autonomous_enabled=autonomous_enabled,
+            confidence_threshold=float(
+                self.config.get(
+                    "confidence_threshold",
+                    SAFE_DEFAULTS["confidence_threshold"],
+                )
+            ),
+            min_repeated_evidence_for_destructive=int(
+                self.config.get(
+                    "min_evidence_count",
+                    SAFE_DEFAULTS["min_repeated_evidence_for_destructive"],
+                )
+            ),
+            never_block_rfc1918=self.config.get(
+                "never_block_rfc1918", SAFE_DEFAULTS["never_block_rfc1918"]
+            ),
+            protected_pids_max=int(
+                self.config.get(
+                    "protected_pids_max", SAFE_DEFAULTS["protected_pids_max"]
+                )
+            ),
+        )
+
+        decision["action_effective"] = result.downgraded_action.value
+        decision["policy_allowed"] = result.allowed
+        decision["policy_rationale"] = result.rationale
+
+        if not result.allowed:
+            with METRICS_LOCK:
+                METRICS["policy_blocks"] += 1
+            self.log.info(
+                "Policy gate blocked %s -> %s: %s",
+                requested,
+                decision["action_effective"],
+                result.rationale,
+            )
+        else:
+            self.log.warning(
+                "Policy gate ALLOWED: %s target=%s",
+                decision["action_effective"],
+                decision.get("target"),
+            )
+
+        return decision
+
+    def maybe_dispatch_to_executor(self, decision: dict, event_id: int) -> None:
+        """Send policy-approved destructive actions to the Go executor."""
+        if event_id < 0:
+            return
+        if not decision.get("policy_allowed"):
+            return
+
+        effective = (
+            decision.get("action_effective")
+            or decision.get("action_required", "NONE")
+        )
+        if effective not in ("KILL", "BLOCK", "QUARANTINE"):
+            return
+
+        from bifrost.router import execute_decision
+
+        dispatch_payload = dict(decision)
+        dispatch_payload["action_required"] = effective
+
+        if execute_decision(dispatch_payload, event_id, self.db_path, self.log):
+            with METRICS_LOCK:
+                METRICS["actions_dispatched"] += 1
+            self.log.warning(
+                "Executor dispatched: %s target=%s event_id=%d",
+                effective,
+                dispatch_payload.get("target"),
+                event_id,
+            )
+        else:
+            self.log.error(
+                "Executor dispatch failed: %s target=%s event_id=%d",
+                effective,
+                dispatch_payload.get("target"),
+                event_id,
+            )
+
     def store_event(self, event: dict, compressed=None, decision=None) -> int:
         boundary = event.get("boundary", "UNKNOWN")
         source = event.get("source", "unknown")
@@ -626,7 +907,12 @@ class EventRouter(threading.Thread):
         timestamp = event.get(
             "timestamp", datetime.now(timezone.utc).isoformat()
         )
-        action = decision.get("action_required", "NONE") if decision else None
+        action = None
+        if decision:
+            action = (
+                decision.get("action_effective")
+                or decision.get("action_required", "NONE")
+            )
 
         try:
             cursor = self.conn.cursor()
@@ -637,7 +923,7 @@ class EventRouter(threading.Thread):
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
                 timestamp, source, boundary, raw,
-                compressed if isinstance(compressed, str) else json.dumps(compressed),
+                _normalize_compressed_event(compressed),
                 json.dumps(decision) if decision else None,
                 action
             ))
@@ -649,31 +935,25 @@ class EventRouter(threading.Thread):
 
     def run(self):
         self.log.info("EventRouter started. Bifrost pipeline active.")
-        while not SHUTDOWN.is_set():
+        while not (SHUTDOWN.is_set() and self.queue.empty()):
+            event = None
             try:
                 event = self.queue.get(timeout=1.0)
                 boundary = event.get("boundary", "UNKNOWN")
                 source = event.get("source", "unknown")
-
-                self.event_count += 1
-                if self.event_count % 100 == 0:
-                    with METRICS_LOCK:
-                        self.log.info(
-                            f"Bifrost metrics: {json.dumps(METRICS)}"
-                        )
 
                 raw_data = event.get("raw", {})
                 is_breakout = (
                     isinstance(raw_data, dict) and
                     raw_data.get("alert") in [
                         "honeypot_to_host_connection",
-                        "container_escape_detected"
+                        "container_escape_detected",
                     ]
                 )
 
                 if boundary == "HONEYPOT" and not is_breakout:
                     self.store_event(event)
-                    self.queue.task_done()
+                    self.event_count += 1
                     continue
 
                 self.log.info(
@@ -682,40 +962,74 @@ class EventRouter(threading.Thread):
 
                 compressed = self.compress_event(event)
                 decision = self.route_to_heimdall(compressed)
-                self.store_event(event, compressed, decision)
+                decision = self.apply_policy_gate(decision, event)
+                event_id = self.store_event(event, compressed, decision)
 
                 severity = decision.get("severity", "UNKNOWN")
-                action = decision.get("action_required", "NONE")
+                action = decision.get("action_requested", decision.get("action_required", "NONE"))
+                effective = decision.get("action_effective", action)
                 confidence = decision.get("confidence", 0.0)
 
                 self.log.info(
-                    f"Heimdall: action={action} severity={severity} "
-                    f"confidence={confidence:.2f}"
+                    f"Heimdall: action={action} effective={effective} "
+                    f"severity={severity} confidence={confidence:.2f}"
                 )
 
-                if action in ["KILL", "BLOCK", "QUARANTINE"]:
-                    self.log.warning(
-                        f"[!!!] ACTION PROPOSED: {action} — "
-                        f"{decision.get('reasoning', '')} "
-                        f"[DRY RUN — not enforced]"
-                    )
+                if effective in ["KILL", "BLOCK", "QUARANTINE"]:
+                    if decision.get("policy_allowed"):
+                        self.log.warning(
+                            f"[!!!] AUTONOMOUS ACTION: {effective} — "
+                            f"{decision.get('reasoning', '')}"
+                        )
+                    else:
+                        self.log.warning(
+                            f"[!!!] ACTION BLOCKED BY POLICY: {action} — "
+                            f"{decision.get('policy_rationale', '')}"
+                        )
+
+                self.maybe_dispatch_to_executor(decision, event_id)
 
                 tier = decision.get("gjallarhorn_tier", 1)
                 self.log.info(f"Gjallarhorn Tier {tier} alert queued.")
-                self.queue.task_done()
+                self.event_count += 1
+
+                if self.event_count % 100 == 0:
+                    with METRICS_LOCK:
+                        self.log.info(
+                            f"Bifrost metrics: {json.dumps(METRICS)}"
+                        )
 
             except Empty:
                 continue
             except Exception as e:
                 self.log.error(f"EventRouter error: {e}")
+            finally:
+                if event is not None:
+                    self.queue.task_done()
 
+        self.flush_db()
         if self.conn:
             self.conn.close()
 
 
+def drain_event_queue(queue: Queue, timeout: float, poll_interval: float = 0.1):
+    """
+    Wait for all queued tasks to be marked done before the timeout expires.
+    Returns (drained, remaining_tasks).
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = queue.unfinished_tasks
+        if remaining <= 0:
+            return True, 0
+        if time.monotonic() >= deadline:
+            return False, remaining
+        time.sleep(poll_interval)
+
+
 def signal_handler(sig, frame):
     print("\n[*] Shutdown signal received. Draining queue...")
-    SHUTDOWN.set()
+    COLLECTOR_STOP.set()
 
 
 def main():
@@ -725,6 +1039,7 @@ def main():
     log.info("=" * 60)
 
     config = load_config()
+    refresh_runtime_paths(config)
     banner(config)
 
     db_path = init_database()
@@ -740,7 +1055,11 @@ def main():
 
     collectors = [
         AuditdCollector(EVENT_QUEUE, log),
-        HoneypotLogCollector(EVENT_QUEUE, log),
+        HoneypotLogCollector(
+            EVENT_QUEUE,
+            log,
+            bifrost_paths.cowrie_log_path(config),
+        ),
         ProcessWatcher(EVENT_QUEUE, log),
         NetworkWatcher(EVENT_QUEUE, log),
     ]
@@ -754,31 +1073,37 @@ def main():
     log.info("Bifrost pipeline active.")
     log.info("Heimdall is online. The bridge is watched.")
 
-    while not SHUTDOWN.is_set():
+    while not COLLECTOR_STOP.is_set():
         time.sleep(1.0)
 
-    # Graceful shutdown — drain queue first
     log.info("Stopping collectors...")
     for collector in collectors:
         collector.join(timeout=2.0)
 
+    log.info("Stopping ingest server...")
+    ingest_server.stop()
+
     log.info("Draining event queue...")
-    drain_timeout = 10.0
-    drain_start = time.time()
-    while not EVENT_QUEUE.empty():
-        if time.time() - drain_start > drain_timeout:
-            log.warning("Queue drain timeout. Exiting.")
-            break
-        time.sleep(0.1)
+    drained, remaining = drain_event_queue(EVENT_QUEUE, timeout=10.0)
+    if drained:
+        log.info("Event queue drained successfully.")
+    else:
+        log.warning("Queue drain timeout. remaining_events=%d", remaining)
 
     log.info("Stopping router...")
+    SHUTDOWN.set()
     router.join(timeout=5.0)
     if router.is_alive():
         log.warning("Router still alive after shutdown timeout.")
 
-    ingest_server.stop()
-
+    remaining = EVENT_QUEUE.unfinished_tasks
     with METRICS_LOCK:
+        log.info(
+            "Shutdown summary: processed=%d dropped=%d remaining=%d",
+            router.event_count,
+            METRICS["events_dropped"],
+            remaining,
+        )
         log.info(f"Final metrics: {json.dumps(METRICS)}")
 
     log.info("Heimdall shutdown complete.")

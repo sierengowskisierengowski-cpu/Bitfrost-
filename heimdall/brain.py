@@ -172,8 +172,8 @@ class BifrostBrain:
             if target.startswith("pid:"):
                 try:
                     pid = int(target.split(":")[1])
-                except Exception:
-                    pass
+                except (ValueError, IndexError) as pid_err:
+                    log.debug("Brain: could not parse pid from target: %s", pid_err)
             elif "." in target:
                 dest_ip = target
 

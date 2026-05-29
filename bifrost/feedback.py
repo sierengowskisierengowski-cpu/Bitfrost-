@@ -18,9 +18,9 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-log = logging.getLogger("heimdall.feedback")
+from bifrost.paths import db_path as resolve_db_path
 
-DB_PATH = Path("~/Projects/bifrost/db/events.db").expanduser()
+log = logging.getLogger("heimdall.feedback")
 
 
 def mark_false_positive(
@@ -34,12 +34,12 @@ def mark_false_positive(
     Stores the pattern so Heimdall avoids it in future.
     Also triggers rollback of any action taken.
     """
-    if not DB_PATH.exists():
+    if not resolve_db_path().exists():
         log.error("Database not found.")
         return False
 
     try:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = sqlite3.connect(str(resolve_db_path()))
         cursor = conn.cursor()
 
         # Mark the event
@@ -130,11 +130,11 @@ def get_false_positives(limit: int = 50) -> list:
     Returns recent false positive patterns.
     Included in the Heimdall prompt to prevent repeat mistakes.
     """
-    if not DB_PATH.exists():
+    if not resolve_db_path().exists():
         return []
 
     try:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = sqlite3.connect(str(resolve_db_path()))
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -167,11 +167,11 @@ def get_action_history(limit: int = 20) -> list:
     Returns recent autonomous actions taken by Heimdall.
     Used in the dashboard and for rollback reference.
     """
-    if not DB_PATH.exists():
+    if not resolve_db_path().exists():
         return []
 
     try:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = sqlite3.connect(str(resolve_db_path()))
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -219,11 +219,11 @@ def get_stats() -> dict:
     Returns overall Heimdall performance statistics.
     Shows how accurate Heimdall has been over time.
     """
-    if not DB_PATH.exists():
+    if not resolve_db_path().exists():
         return {}
 
     try:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = sqlite3.connect(str(resolve_db_path()))
         cursor = conn.cursor()
 
         cursor.execute("SELECT COUNT(*) FROM events")

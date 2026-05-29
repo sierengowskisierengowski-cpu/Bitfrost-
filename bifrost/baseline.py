@@ -30,10 +30,9 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from collections import Counter
 
-log = logging.getLogger("heimdall.baseline")
+from bifrost.paths import db_path as resolve_db_path
 
-DB_PATH = Path("~/Projects/bifrost/db/events.db").expanduser()
-CONFIG_PATH = Path("~/Projects/bifrost/heimdall_config.json").expanduser()
+log = logging.getLogger("heimdall.baseline")
 
 
 def get_learning_status(config: dict) -> dict:
@@ -43,7 +42,7 @@ def get_learning_status(config: dict) -> dict:
     """
     learning_days = config.get("learning_period_days", 7)
 
-    if not DB_PATH.exists():
+    if not resolve_db_path().exists():
         return {
             "mode": "learning",
             "started_at": None,
@@ -54,7 +53,7 @@ def get_learning_status(config: dict) -> dict:
         }
 
     try:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = sqlite3.connect(str(resolve_db_path()))
         cursor = conn.cursor()
 
         # Get first event timestamp
@@ -113,11 +112,11 @@ def build_process_baseline() -> dict:
     normally run on this system. Returns frequency data
     that Heimdall uses to detect anomalies.
     """
-    if not DB_PATH.exists():
+    if not resolve_db_path().exists():
         return {}
 
     try:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = sqlite3.connect(str(resolve_db_path()))
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -169,11 +168,11 @@ def build_network_baseline() -> dict:
     patterns. Identifies expected outbound destinations
     and ports so anomalies stand out clearly.
     """
-    if not DB_PATH.exists():
+    if not resolve_db_path().exists():
         return {}
 
     try:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = sqlite3.connect(str(resolve_db_path()))
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -221,11 +220,11 @@ def build_honeypot_baseline() -> dict:
     changes in volume or type can indicate a targeted
     campaign rather than background noise.
     """
-    if not DB_PATH.exists():
+    if not resolve_db_path().exists():
         return {}
 
     try:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = sqlite3.connect(str(resolve_db_path()))
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -263,11 +262,11 @@ def save_baseline(baseline_data: dict):
     Heimdall reads this on startup to calibrate
     its anomaly detection.
     """
-    if not DB_PATH.exists():
+    if not resolve_db_path().exists():
         return
 
     try:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = sqlite3.connect(str(resolve_db_path()))
         cursor = conn.cursor()
 
         for metric, value in baseline_data.items():
@@ -293,11 +292,11 @@ def load_baseline() -> dict:
     Loads the most recent baseline from the database.
     Returns empty dict if no baseline exists yet.
     """
-    if not DB_PATH.exists():
+    if not resolve_db_path().exists():
         return {}
 
     try:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = sqlite3.connect(str(resolve_db_path()))
         cursor = conn.cursor()
 
         cursor.execute("""

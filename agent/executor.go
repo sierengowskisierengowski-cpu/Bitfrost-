@@ -1,25 +1,22 @@
 package main
 
 import (
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
-)
-
-const (
-	ExecutorPort    = "8766"
-	QuarantineZone  = "/var/lib/heimdall/quarantine/"
-	DBPath          = "/var/lib/heimdall/events.db"
 )
 
 type HeimdallVerdict struct {
@@ -40,16 +37,36 @@ type ActionResult struct {
 }
 
 func startExecutor() {
-	log.Printf("[*] Bifrost Executor starting on port %s...", ExecutorPort)
+	port := executorPort()
+	log.Printf("[*] Bifrost Executor starting on port %s...", port)
 	http.HandleFunc("/execute", handleVerdict)
 	http.HandleFunc("/rollback", handleRollback)
 	http.HandleFunc("/health", handleHealth)
-	log.Fatal(http.ListenAndServe("127.0.0.1:"+ExecutorPort, nil))
+	log.Fatal(http.ListenAndServe("127.0.0.1:"+port, nil))
+}
+
+func executorToken() string {
+	return strings.TrimSpace(os.Getenv("BIFROST_EXECUTOR_TOKEN"))
+}
+
+func authorizeExecutorRequest(r *http.Request) bool {
+	token := executorToken()
+	if token == "" {
+		log.Printf("[!] BIFROST_EXECUTOR_TOKEN unset — refusing executor requests")
+		return false
+	}
+	provided := strings.TrimSpace(r.Header.Get("X-Bifrost-Token"))
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(token)) == 1
 }
 
 func handleVerdict(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if !authorizeExecutorRequest(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -74,6 +91,11 @@ func handleVerdict(w http.ResponseWriter, r *http.Request) {
 func handleRollback(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if !authorizeExecutorRequest(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -187,9 +209,14 @@ func blockIP(v HeimdallVerdict) ActionResult {
 		ExecutedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 
-	// Validate IP length — prevents injection
 	if len(v.Target) > 45 {
 		log.Printf("[!] IP too long — block aborted: %s", v.Target)
+		result.Success = false
+		return result
+	}
+
+	if net.ParseIP(v.Target) == nil {
+		log.Printf("[!] Invalid IP — block aborted: %s", v.Target)
 		result.Success = false
 		return result
 	}
@@ -218,7 +245,7 @@ func quarantineFile(v HeimdallVerdict) ActionResult {
 		ExecutedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 
-	if err := os.MkdirAll(QuarantineZone, 0700); err != nil {
+	if err := os.MkdirAll(quarantineZone(), 0700); err != nil {
 		log.Printf("[!] Cannot create quarantine zone: %v", err)
 		result.Success = false
 		return result
@@ -229,7 +256,7 @@ func quarantineFile(v HeimdallVerdict) ActionResult {
 		"%d_%s.quarantined",
 		time.Now().UnixNano(), originalName,
 	)
-	destPath := filepath.Join(QuarantineZone, destName)
+	destPath := filepath.Join(quarantineZone(), destName)
 
 	result.RollbackData = fmt.Sprintf(
 		`{"original":"%s","quarantined":"%s","rollback":"mv %s %s"}`,
@@ -251,7 +278,7 @@ func quarantineFile(v HeimdallVerdict) ActionResult {
 }
 
 func logAction(eventID int64, result ActionResult) {
-	db, err := sql.Open("sqlite3", DBPath)
+	db, err := sql.Open("sqlite3", executorDBPath())
 	if err != nil {
 		log.Printf("[!] Cannot open DB for action log: %v", err)
 		return
@@ -276,7 +303,7 @@ func logAction(eventID int64, result ActionResult) {
 }
 
 func rollbackAction(actionID int64) error {
-	db, err := sql.Open("sqlite3", DBPath)
+	db, err := sql.Open("sqlite3", executorDBPath())
 	if err != nil {
 		return fmt.Errorf("DB open failed: %v", err)
 	}

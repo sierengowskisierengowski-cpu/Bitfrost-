@@ -115,7 +115,7 @@ from bifrost.inference import (
 
 log = logging.getLogger("heimdall.reasoner")
 
-DB_PATH = Path("~/Projects/bifrost/db/events.db").expanduser()
+from bifrost.paths import db_path as resolve_db_path
 INFERENCE_CIRCUIT_BREAKERS = {
     "ollama": CircuitBreaker(),
     "groq": CircuitBreaker(),
@@ -305,10 +305,13 @@ def load_false_positives() -> list:
     Loads known false positive patterns from the database.
     Included in the Heimdall prompt so it learns from corrections.
     """
-    if not DB_PATH.exists():
+    path = resolve_db_path()
+    if not path.exists():
         return []
     try:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = sqlite3.connect(str(path))
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         cursor = conn.cursor()
         cursor.execute(
             "SELECT threat_class, pattern FROM false_positives "

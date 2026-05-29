@@ -14,10 +14,8 @@ import (
 )
 
 const (
-	UnixSocketPath  = "/var/run/bifrost_telemetry.sock"
-	PythonEngineURL = "http://127.0.0.1:8765/ingest"
-	WorkerCount     = 4
-	QueueSize       = 5000
+	WorkerCount = 4
+	QueueSize   = 5000
 )
 
 // TelemetryEnvelope matches the RawEvent schema in heimdall/schema.py
@@ -31,30 +29,33 @@ type TelemetryEnvelope struct {
 func startCollector() {
 	log.Println("[*] Bifrost Telemetry Collector starting...")
 
+	socketPath := unixSocketPath()
+	ingestURL := pythonEngineURL()
+
 	signalChan := make(chan os.Signal, 1)
 	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-signalChan
 		log.Println("[!] Collector shutting down. Cleaning socket...")
-		_ = os.Remove(UnixSocketPath)
+		_ = os.Remove(socketPath)
 		os.Exit(0)
 	}()
 
-	_ = os.Remove(UnixSocketPath)
-	listener, err := net.Listen("unix", UnixSocketPath)
+	_ = os.Remove(socketPath)
+	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
-		log.Fatalf("[!] Cannot bind Unix socket %s: %v", UnixSocketPath, err)
+		log.Fatalf("[!] Cannot bind Unix socket %s: %v", socketPath, err)
 	}
 	defer listener.Close()
-	_ = os.Chmod(UnixSocketPath, 0666)
+	_ = os.Chmod(socketPath, 0666)
 
-	log.Printf("[+] Collector listening on %s", UnixSocketPath)
-	log.Printf("[+] Forwarding to %s", PythonEngineURL)
+	log.Printf("[+] Collector listening on %s", socketPath)
+	log.Printf("[+] Forwarding to %s", ingestURL)
 
 	queue := make(chan TelemetryEnvelope, QueueSize)
 
 	for w := 1; w <= WorkerCount; w++ {
-		go dispatchWorker(queue, w)
+		go dispatchWorker(queue, w, ingestURL)
 	}
 
 	for {
@@ -113,7 +114,7 @@ func handleConnection(conn net.Conn, queue chan<- TelemetryEnvelope) {
 	}
 }
 
-func dispatchWorker(queue <-chan TelemetryEnvelope, id int) {
+func dispatchWorker(queue <-chan TelemetryEnvelope, id int, ingestURL string) {
 	client := &http.Client{
 		Timeout: 3 * time.Second,
 	}
@@ -126,12 +127,12 @@ func dispatchWorker(queue <-chan TelemetryEnvelope, id int) {
 		}
 
 		resp, err := client.Post(
-			PythonEngineURL,
+			ingestURL,
 			"application/json",
 			bytes.NewBuffer(payload),
 		)
 		if err != nil {
-			// Ingest endpoint not ready yet — fail silently
+			log.Printf("[!] Worker %d: ingest POST failed: %v", id, err)
 			continue
 		}
 		resp.Body.Close()
