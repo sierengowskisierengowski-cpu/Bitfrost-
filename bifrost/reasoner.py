@@ -107,10 +107,20 @@ from pathlib import Path
 from typing import Optional
 
 from bifrost.extractor import format_for_heimdall
+from bifrost.inference import (
+    CircuitBreaker,
+    execute_with_retry,
+    get_request_timeout,
+)
 
 log = logging.getLogger("heimdall.reasoner")
 
 DB_PATH = Path("~/Projects/bifrost/db/events.db").expanduser()
+INFERENCE_CIRCUIT_BREAKERS = {
+    "ollama": CircuitBreaker(),
+    "groq": CircuitBreaker(),
+    "claude": CircuitBreaker(),
+}
 
 # Rolling event buffer per source IP and per process
 # Heimdall sees attack chains not just individual events
@@ -363,20 +373,29 @@ def route_to_ollama(
         from openai import OpenAI
         client = OpenAI(
             base_url=config.get("local_url", "http://localhost:11434/v1"),
-            api_key="ollama"
+            api_key="ollama",
+            timeout=get_request_timeout(config)
         )
         model = config.get("analyst_model")
         if not model:
             return None
 
-        response = client.chat.completions.create(
-            model=model,
-            temperature=0.0,
-            messages=[
-                {"role": "system", "content": system_baseline},
-                {"role": "user", "content": prompt}
-            ]
+        response, _ = execute_with_retry(
+            lambda: client.chat.completions.create(
+                model=model,
+                temperature=0.0,
+                messages=[
+                    {"role": "system", "content": system_baseline},
+                    {"role": "user", "content": prompt}
+                ]
+            ),
+            provider="ollama",
+            config=config,
+            logger=log,
+            circuit_breaker=INFERENCE_CIRCUIT_BREAKERS["ollama"],
         )
+        if not response:
+            return None
 
         content = response.choices[0].message.content.strip()
         return json.loads(content)
@@ -406,18 +425,27 @@ def route_to_groq(
             base_url=config.get(
                 "groq_url", "https://api.groq.com/openai/v1"
             ),
-            api_key=api_key
+            api_key=api_key,
+            timeout=get_request_timeout(config)
         )
         model = config.get("groq_model", "llama-3.3-70b-versatile")
 
-        response = client.chat.completions.create(
-            model=model,
-            temperature=0.0,
-            messages=[
-                {"role": "system", "content": system_baseline},
-                {"role": "user", "content": prompt}
-            ]
+        response, _ = execute_with_retry(
+            lambda: client.chat.completions.create(
+                model=model,
+                temperature=0.0,
+                messages=[
+                    {"role": "system", "content": system_baseline},
+                    {"role": "user", "content": prompt}
+                ]
+            ),
+            provider="groq",
+            config=config,
+            logger=log,
+            circuit_breaker=INFERENCE_CIRCUIT_BREAKERS["groq"],
         )
+        if not response:
+            return None
 
         content = response.choices[0].message.content.strip()
         return json.loads(content)
@@ -443,17 +471,28 @@ def route_to_claude(
             log.warning("HEIMDALL_CLAUDE_KEY not set. Claude unavailable.")
             return None
 
-        client = anthropic.Anthropic(api_key=api_key)
+        client = anthropic.Anthropic(
+            api_key=api_key,
+            timeout=get_request_timeout(config)
+        )
         model = config.get("claude_model", "claude-sonnet-4-20250514")
 
-        message = client.messages.create(
-            model=model,
-            max_tokens=1024,
-            system=system_baseline,
-            messages=[
-                {"role": "user", "content": prompt}
-            ]
+        message, _ = execute_with_retry(
+            lambda: client.messages.create(
+                model=model,
+                max_tokens=1024,
+                system=system_baseline,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ]
+            ),
+            provider="claude",
+            config=config,
+            logger=log,
+            circuit_breaker=INFERENCE_CIRCUIT_BREAKERS["claude"],
         )
+        if not message:
+            return None
 
         content = message.content[0].text.strip()
         return json.loads(content)

@@ -27,6 +27,8 @@ from pathlib import Path
 from datetime import datetime, timezone
 from queue import Queue, Empty, Full
 
+from bifrost.inference import CircuitBreaker, execute_with_retry, get_request_timeout
+
 BIFROST_VERSION = "0.1.1"
 CONFIG_PATH = Path("~/Projects/bifrost/heimdall_config.json").expanduser()
 DB_PATH = Path("~/Projects/bifrost/db/events.db").expanduser()
@@ -493,6 +495,8 @@ class EventRouter(threading.Thread):
         self.log = log
         self.event_count = 0
         self.conn = None
+        self.extractor_breaker = CircuitBreaker()
+        self.analyst_breaker = CircuitBreaker()
         self.setup_inference_clients()
         self.setup_db()
 
@@ -509,13 +513,13 @@ class EventRouter(threading.Thread):
                 self.analyst_client = OpenAI(
                     base_url=self.config["local_url"],
                     api_key="ollama",
-                    timeout=self.LLM_TIMEOUT
+                    timeout=get_request_timeout(self.config)
                 )
                 self.analyst_model = self.config["analyst_model"]
                 self.extractor_client = OpenAI(
                     base_url=self.config["local_url"],
                     api_key="ollama",
-                    timeout=self.LLM_TIMEOUT
+                    timeout=get_request_timeout(self.config)
                 )
                 self.extractor_model = self.config["extractor_model"]
             else:
@@ -523,7 +527,7 @@ class EventRouter(threading.Thread):
                 self.analyst_client = OpenAI(
                     base_url=self.config.get("groq_url", ""),
                     api_key=api_key,
-                    timeout=self.LLM_TIMEOUT
+                    timeout=get_request_timeout(self.config)
                 )
                 self.analyst_model = self.config.get("groq_model", "")
                 self.extractor_client = None
@@ -540,21 +544,33 @@ class EventRouter(threading.Thread):
 
         try:
             raw = json.dumps(event.get("raw", {}))
-            response = self.extractor_client.chat.completions.create(
-                model=self.extractor_model,
-                temperature=0.0,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a security event compressor. "
-                            "Strip hex addresses and register states. "
-                            "Return compact JSON only. No explanation."
-                        )
-                    },
-                    {"role": "user", "content": raw}
-                ]
+            response, error = execute_with_retry(
+                lambda: self.extractor_client.chat.completions.create(
+                    model=self.extractor_model,
+                    temperature=0.0,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a security event compressor. "
+                                "Strip hex addresses and register states. "
+                                "Return compact JSON only. No explanation."
+                            )
+                        },
+                        {"role": "user", "content": raw}
+                    ]
+                ),
+                provider="guardian_extractor",
+                config=self.config,
+                logger=self.log,
+                circuit_breaker=self.extractor_breaker,
             )
+            if not response:
+                reason = "extractor_circuit_open" if error == "circuit_open" else "extractor_error"
+                self.log.warning("Extractor degraded mode: %s", reason)
+                with METRICS_LOCK:
+                    METRICS["llm_errors"] += 1
+                return json.dumps(event.get("raw", {}))[:500]
             return response.choices[0].message.content.strip()
         except Exception as e:
             self.log.warning(f"Extractor error: {e}. Using raw fallback.")
@@ -568,17 +584,29 @@ class EventRouter(threading.Thread):
 
         try:
             baseline = self.config.get("system_baseline", "")
-            response = self.analyst_client.chat.completions.create(
-                model=self.analyst_model,
-                temperature=0.0,
-                messages=[
-                    {"role": "system", "content": baseline},
-                    {
-                        "role": "user",
-                        "content": f"Analyze this security event as JSON:\n{compressed}"
-                    }
-                ]
+            response, error = execute_with_retry(
+                lambda: self.analyst_client.chat.completions.create(
+                    model=self.analyst_model,
+                    temperature=0.0,
+                    messages=[
+                        {"role": "system", "content": baseline},
+                        {
+                            "role": "user",
+                            "content": f"Analyze this security event as JSON:\n{compressed}"
+                        }
+                    ]
+                ),
+                provider="guardian_analyst",
+                config=self.config,
+                logger=self.log,
+                circuit_breaker=self.analyst_breaker,
             )
+            if not response:
+                with METRICS_LOCK:
+                    METRICS["llm_errors"] += 1
+                if error == "circuit_open":
+                    return self._safe_fallback("analyst_circuit_open")
+                return self._safe_fallback("llm_error")
             raw_decision = response.choices[0].message.content.strip()
 
             # Strip markdown fences if present

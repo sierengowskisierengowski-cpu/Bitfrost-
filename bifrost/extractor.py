@@ -20,6 +20,8 @@ import json
 import logging
 from datetime import datetime, timezone
 
+from bifrost.inference import CircuitBreaker, execute_with_retry, get_request_timeout
+
 log = logging.getLogger("heimdall.extractor")
 
 HEX_ADDRESS_PATTERN = re.compile(r'\b0x[0-9a-fA-F]+\b')
@@ -65,6 +67,8 @@ Output schema:
   "raw_snippet": "string max 100 chars"
 }
 """.strip()
+
+EXTRACTOR_CIRCUIT_BREAKER = CircuitBreaker()
 
 
 def strip_noise_deterministic(raw_text: str) -> str:
@@ -158,7 +162,7 @@ def extract_key_fields(event: dict) -> dict:
     return extracted
 
 
-def compress_event_with_model(event: dict, client, model: str) -> dict:
+def compress_event_with_model(event: dict, client, model: str, config: dict) -> dict:
     """
     Uses the 1.5B extractor model to compress the event.
     Falls back to deterministic extraction if model fails.
@@ -167,14 +171,22 @@ def compress_event_with_model(event: dict, client, model: str) -> dict:
         raw_text = json.dumps(event.get("raw", {}))
         pre_stripped = strip_noise_deterministic(raw_text)
 
-        response = client.chat.completions.create(
-            model=model,
-            temperature=0.0,
-            messages=[
-                {"role": "system", "content": EXTRACTOR_SYSTEM_PROMPT},
-                {"role": "user", "content": pre_stripped}
-            ]
+        response, _ = execute_with_retry(
+            lambda: client.chat.completions.create(
+                model=model,
+                temperature=0.0,
+                messages=[
+                    {"role": "system", "content": EXTRACTOR_SYSTEM_PROMPT},
+                    {"role": "user", "content": pre_stripped}
+                ]
+            ),
+            provider="extractor",
+            config=config,
+            logger=log,
+            circuit_breaker=EXTRACTOR_CIRCUIT_BREAKER,
         )
+        if not response:
+            return compress_event_deterministic(event, model)
 
         content = response.choices[0].message.content.strip()
 
@@ -243,10 +255,11 @@ def compress_event(event: dict, config: dict) -> dict:
             base_url=config.get(
                 "local_url", "http://localhost:11434/v1"
             ),
-            api_key="ollama"
+            api_key="ollama",
+            timeout=get_request_timeout(config)
         )
         log.debug(f"Model extraction: model={extractor_model}")
-        return compress_event_with_model(event, client, extractor_model)
+        return compress_event_with_model(event, client, extractor_model, config)
 
     except Exception as e:
         log.warning(f"Model client init failed: {e}. Deterministic fallback.")
