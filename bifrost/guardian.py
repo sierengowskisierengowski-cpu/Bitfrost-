@@ -47,6 +47,7 @@ METRICS = {
     "queue_full_count": 0,
 }
 
+
 def setup_logging():
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(

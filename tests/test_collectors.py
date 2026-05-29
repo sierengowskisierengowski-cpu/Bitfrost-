@@ -8,7 +8,7 @@ from bifrost.bpf_collector import BPFCollector
 from bifrost.guardian import NetworkWatcher
 
 
-class _FakeBPFMap:
+class FakeBPFMap:
     def __init__(self, event_factory):
         self._event_factory = event_factory
 
@@ -16,9 +16,9 @@ class _FakeBPFMap:
         return self._event_factory(data)
 
 
-class _FakeBPF:
+class FakeBPF:
     def __init__(self, event_factory):
-        self._events = _FakeBPFMap(event_factory)
+        self._events = FakeBPFMap(event_factory)
 
     def __getitem__(self, key):
         if key != "events":
@@ -26,7 +26,7 @@ class _FakeBPF:
         return self._events
 
 
-class _FakeEvent:
+class FakeEvent:
     pid = 4242
     uid = 0
     comm = b"python"
@@ -63,7 +63,7 @@ def test_bpf_collector_logs_queue_full_once(caplog):
         threading.Event(),
         logging.getLogger("test.bpf.queue"),
     )
-    collector.bpf = _FakeBPF(lambda data: _FakeEvent())
+    collector.bpf = FakeBPF(lambda data: FakeEvent())
     collector.queue.put_nowait({"existing": True})
 
     with caplog.at_level(logging.WARNING):
@@ -83,7 +83,7 @@ def test_bpf_collector_logs_parse_error_once(caplog):
         threading.Event(),
         logging.getLogger("test.bpf.parse"),
     )
-    collector.bpf = _FakeBPF(_raise_bad_event)
+    collector.bpf = FakeBPF(_raise_bad_event)
 
     with caplog.at_level(logging.WARNING):
         collector.handle_event(0, object(), 0)
