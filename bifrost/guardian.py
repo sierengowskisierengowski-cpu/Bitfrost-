@@ -679,9 +679,7 @@ class EventRouter(threading.Thread):
 
     def run(self):
         self.log.info("EventRouter started. Bifrost pipeline active.")
-        # Keep routing queued work until an explicit router stop is requested
-        # and the backlog has been drained.
-        while not ROUTER_STOP.is_set() or not self.queue.empty():
+        while True:
             try:
                 event = self.queue.get(timeout=self.QUEUE_POLL_INTERVAL)
                 boundary = event.get("boundary", "UNKNOWN")
