@@ -112,7 +112,6 @@ class BPFCollector(threading.Thread):
             KeyError,
             TypeError,
             ValueError,
-            RuntimeError,
             UnicodeDecodeError,
         ) as e:
             # Event decoding can fail on missing ring-buffer fields, malformed
