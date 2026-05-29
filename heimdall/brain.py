@@ -11,6 +11,7 @@ Nothing reaches the executor without passing brain first.
 """
 
 from __future__ import annotations
+import ipaddress
 import logging
 import json
 from datetime import datetime, timezone
@@ -174,8 +175,12 @@ class BifrostBrain:
                     pid = int(target.split(":")[1])
                 except Exception:
                     pass
-            elif "." in target:
-                dest_ip = target
+            elif target:
+                try:
+                    ipaddress.ip_address(target)
+                    dest_ip = target
+                except ValueError:
+                    pass
 
             policy_decision = PolicyDecision(
                 action=PolicyActionType(decision.action_required.value),
