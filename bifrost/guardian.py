@@ -29,6 +29,11 @@ from queue import Queue, Empty, Full
 
 from heimdall.schema import Decision as SchemaDecision
 
+try:
+    from pydantic import ValidationError as SchemaValidationError
+except ImportError:
+    SchemaValidationError = ValueError
+
 BIFROST_VERSION = "0.1.1"
 CONFIG_PATH = Path("~/Projects/bifrost/heimdall_config.json").expanduser()
 DB_PATH = Path("~/Projects/bifrost/db/events.db").expanduser()
@@ -615,7 +620,7 @@ class EventRouter(threading.Thread):
 
             try:
                 validated = SchemaDecision.from_dict(decision)
-            except Exception as e:
+            except (SchemaValidationError, ValueError, TypeError) as e:
                 self.log.error(f"LLM decision validation failed: {e}")
                 with METRICS_LOCK:
                     METRICS["llm_errors"] += 1

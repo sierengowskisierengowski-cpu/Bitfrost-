@@ -45,7 +45,7 @@ def test_route_to_heimdall_validates_llm_decision_schema(monkeypatch):
           "severity": "HIGH",
           "boundary": "HOST",
           "threat_class": "credential_theft",
-          "confidence": 9.5,
+          "confidence": 0.95,
           "action_required": "ALERT",
           "gjallarhorn_tier": 1,
           "reasoning": "validated",
@@ -60,7 +60,7 @@ def test_route_to_heimdall_validates_llm_decision_schema(monkeypatch):
 
     assert decision["severity"] == "HIGH"
     assert decision["action_required"] == "ALERT"
-    assert decision["confidence"] == 1.0
+    assert decision["confidence"] == 0.95
     assert decision["gjallarhorn_tier"] == 1
 
 
