@@ -204,6 +204,7 @@ def safe_enqueue(queue: Queue, event: dict, source: str, log) -> bool:
 
 class AuditdCollector(threading.Thread):
     AUDIT_LOG = Path("/var/log/audit/audit.log")
+    RETRY_INTERVAL = 0.5
 
     def __init__(self, queue, log):
         super().__init__(daemon=True, name="collector.auditd")
@@ -212,43 +213,56 @@ class AuditdCollector(threading.Thread):
 
     def run(self):
         self.log.info("AuditdCollector started.")
-        if not self.AUDIT_LOG.exists():
-            self.log.warning("auditd log not found. Is auditd running?")
-            return
+        warned_missing = False
 
-        try:
-            with open(self.AUDIT_LOG, "r") as f:
-                f.seek(0, 2)
-                inode = os.stat(self.AUDIT_LOG).st_ino
-                while not SHUTDOWN.is_set():
-                    try:
-                        # Detect log rotation
-                        current_inode = os.stat(self.AUDIT_LOG).st_ino
-                        if current_inode != inode:
-                            self.log.info("auditd log rotated. Reopening.")
+        while not SHUTDOWN.is_set():
+            if not self.AUDIT_LOG.exists():
+                if not warned_missing:
+                    self.log.warning("auditd log not found. Is auditd running?")
+                    warned_missing = True
+                time.sleep(self.RETRY_INTERVAL)
+                continue
+
+            warned_missing = False
+            try:
+                with open(self.AUDIT_LOG, "r") as f:
+                    f.seek(0, 2)
+                    inode = os.fstat(f.fileno()).st_ino
+
+                    while not SHUTDOWN.is_set():
+                        try:
+                            current_inode = os.stat(self.AUDIT_LOG).st_ino
+                            if current_inode != inode:
+                                self.log.info("auditd log rotated. Reopening.")
+                                break
+                        except OSError:
+                            self.log.info("auditd log unavailable. Reopening.")
                             break
-                    except OSError:
-                        break
 
-                    line = f.readline()
-                    if not line:
-                        time.sleep(0.1)
-                        continue
-                    if any(key in line for key in [
-                        "execve", "EXECVE", "USER_AUTH",
-                        "USER_LOGIN", "SYSCALL", "key=exec"
-                    ]):
-                        event = {
-                            "source": "auditd",
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                            "boundary": "HOST",
-                            "raw": line.strip()
-                        }
-                        safe_enqueue(self.queue, event, "auditd", self.log)
-        except OSError as e:
-            self.log.error(f"AuditdCollector file error: {e}")
-        except Exception as e:
-            self.log.error(f"AuditdCollector unexpected error: {e}")
+                        line = f.readline()
+                        if not line:
+                            time.sleep(0.1)
+                            continue
+
+                        if any(key in line for key in [
+                            "execve", "EXECVE", "USER_AUTH",
+                            "USER_LOGIN", "SYSCALL", "key=exec"
+                        ]):
+                            event = {
+                                "source": "auditd",
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "boundary": "HOST",
+                                "raw": line.strip()
+                            }
+                            safe_enqueue(self.queue, event, "auditd", self.log)
+            except OSError as e:
+                if SHUTDOWN.is_set():
+                    break
+                self.log.error(f"AuditdCollector file error: {e}")
+                time.sleep(self.RETRY_INTERVAL)
+            except Exception as e:
+                self.log.error(f"AuditdCollector unexpected error: {e}")
+                break
 
 
 class HoneypotLogCollector(threading.Thread):
