@@ -754,10 +754,10 @@ def signal_handler(sig, frame):
 def wait_for_queue_drain(queue: Queue, timeout: float) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if getattr(queue, "unfinished_tasks", 0) == 0:
+        if queue.unfinished_tasks == 0:
             return True
         time.sleep(0.1)
-    return getattr(queue, "unfinished_tasks", 0) == 0
+    return queue.unfinished_tasks == 0
 
 
 def log_shutdown_summary(log, processed: int, dropped: int, remaining: int):
@@ -819,7 +819,7 @@ def main():
 
     log.info("Draining event queue...")
     if not wait_for_queue_drain(EVENT_QUEUE, timeout=10.0):
-        remaining = getattr(EVENT_QUEUE, "unfinished_tasks", EVENT_QUEUE.qsize())
+        remaining = EVENT_QUEUE.unfinished_tasks
         log.warning(f"Queue drain timeout. Remaining events={remaining}.")
 
     ROUTER_STOP.set()
@@ -828,13 +828,13 @@ def main():
     router.join(timeout=5.0)
     if router.is_alive():
         log.warning("Router still alive after shutdown timeout.")
-    router.flush_state()
+        router.flush_state()
 
     with METRICS_LOCK:
         processed = router.event_count
         dropped = METRICS["events_dropped"]
         log.info(f"Final metrics: {json.dumps(METRICS)}")
-    remaining = getattr(EVENT_QUEUE, "unfinished_tasks", EVENT_QUEUE.qsize())
+    remaining = EVENT_QUEUE.unfinished_tasks
     log_shutdown_summary(log, processed, dropped, remaining)
 
     log.info("Heimdall shutdown complete.")
