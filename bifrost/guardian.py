@@ -221,7 +221,8 @@ class AuditdCollector(threading.Thread):
                 if not warned_missing:
                     self.log.warning("auditd log not found. Is auditd running?")
                     warned_missing = True
-                time.sleep(self.RETRY_INTERVAL)
+                if COLLECTOR_STOP.wait(self.RETRY_INTERVAL):
+                    break
                 continue
 
             warned_missing = False
@@ -242,7 +243,8 @@ class AuditdCollector(threading.Thread):
 
                         line = f.readline()
                         if not line:
-                            time.sleep(0.1)
+                            if COLLECTOR_STOP.wait(0.1):
+                                break
                             continue
 
                         if any(key in line for key in [
@@ -260,7 +262,8 @@ class AuditdCollector(threading.Thread):
                 if COLLECTOR_STOP.is_set():
                     break
                 self.log.error(f"AuditdCollector file error: {e}")
-                time.sleep(self.RETRY_INTERVAL)
+                if COLLECTOR_STOP.wait(self.RETRY_INTERVAL):
+                    break
             except Exception as e:
                 self.log.error(f"AuditdCollector unexpected error: {e}")
                 break
@@ -288,7 +291,8 @@ class HoneypotLogCollector(threading.Thread):
                 while not COLLECTOR_STOP.is_set():
                     line = f.readline()
                     if not line:
-                        time.sleep(0.1)
+                        if COLLECTOR_STOP.wait(0.1):
+                            break
                         continue
                     try:
                         entry = json.loads(line.strip())
@@ -823,6 +827,7 @@ def main():
     if router.is_alive():
         log.warning("Router still alive after shutdown timeout.")
 
+    remaining = getattr(EVENT_QUEUE, "unfinished_tasks", EVENT_QUEUE.qsize())
     with METRICS_LOCK:
         log.info(
             "Shutdown summary: processed=%d dropped=%d remaining=%d",
