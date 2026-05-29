@@ -403,6 +403,7 @@ class ProcessWatcher(threading.Thread):
 
 class NetworkWatcher(threading.Thread):
     POLL_INTERVAL = 3.0
+    LOG_RATE_LIMIT_SECONDS = 60.0
     HOST_NET = ipaddress.ip_network("192.168.0.0/24")
     HONEYPOT_PORTS = {2222, 23, 445, 1433, 21, 25, 8888, 3389, 5900}
 
@@ -411,6 +412,16 @@ class NetworkWatcher(threading.Thread):
         self.queue = queue
         self.log = log
         self.seen_connections = set()
+        self._last_log_times = {}
+
+    def _log_rate_limited(self, key: str, level: str, message: str):
+        now = time.monotonic()
+        last_logged = self._last_log_times.get(key)
+        if last_logged is not None:
+            if now - last_logged < self.LOG_RATE_LIMIT_SECONDS:
+                return
+        self._last_log_times[key] = now
+        getattr(self.log, level)(message)
 
     def run(self):
         self.log.info("NetworkWatcher started.")
@@ -426,7 +437,12 @@ class NetworkWatcher(threading.Thread):
             addr = int(hex_ip, 16)
             return (f"{addr & 0xFF}.{(addr >> 8) & 0xFF}."
                     f"{(addr >> 16) & 0xFF}.{(addr >> 24) & 0xFF}")
-        except Exception:
+        except ValueError as e:
+            self._log_rate_limited(
+                f"hex_to_ip:{hex_ip}",
+                "warning",
+                f"NetworkWatcher invalid hex IP '{hex_ip}': {e}"
+            )
             return "0.0.0.0"
 
     def is_host_subnet(self, ip_str: str) -> bool:

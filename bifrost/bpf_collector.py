@@ -16,7 +16,7 @@ import time
 import logging
 import threading
 from datetime import datetime, timezone
-from queue import Queue
+from queue import Queue, Full
 
 log = logging.getLogger("heimdall.bpf_collector")
 
@@ -35,6 +35,7 @@ class BPFCollector(threading.Thread):
     """
     
     BPF_PROGRAM = "kernel/ebpf/syscall_monitor.bpf.c"
+    LOG_RATE_LIMIT_SECONDS = 60.0
     
     def __init__(self, queue: Queue, shutdown_event: threading.Event, log):
         super().__init__(daemon=True, name="collector.ebpf")
@@ -42,6 +43,16 @@ class BPFCollector(threading.Thread):
         self.shutdown = shutdown_event
         self.log = log
         self.bpf = None
+        self._last_log_times = {}
+
+    def _log_rate_limited(self, key: str, level: str, message: str):
+        now = time.monotonic()
+        last_logged = self._last_log_times.get(key)
+        if last_logged is not None:
+            if now - last_logged < self.LOG_RATE_LIMIT_SECONDS:
+                return
+        self._last_log_times[key] = now
+        getattr(self.log, level)(message)
         
     def load_program(self):
         """Load the eBPF program into the kernel."""
@@ -87,9 +98,12 @@ class BPFCollector(threading.Thread):
             # Send to Guardian's event queue
             try:
                 self.queue.put_nowait(guardian_event)
-            except Exception:
-                # Queue full - drop event (prevents blocking kernel)
-                pass
+            except Full:
+                self._log_rate_limited(
+                    "queue_full",
+                    "warning",
+                    "BPFCollector queue full while enqueueing event; dropping event source=ebpf"
+                )
                 
         except Exception as e:
             self.log.warning(f"Event parsing error: {e}")
