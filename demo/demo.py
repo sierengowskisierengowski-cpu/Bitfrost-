@@ -58,6 +58,27 @@ def simple_detect(event):
     elif et == "benign_web":
         action, conf = ActionType.LOG, min(0.3, sev)
         reason = "Normal web traffic — no threat indicators"
+    elif et == "brute_force_ssh":
+        action, conf = ActionType.ALERT, max(0.65, sev)
+        reason = "SSH credential brute force — honeypot zone (expected noise; no host action)"
+    elif et == "scratch_space_exec":
+        action, conf = ActionType.KILL, max(0.90, sev)
+        reason = "Execve from scratch space (/tmp) — high-confidence dropper execution"
+    elif et == "systemd_persistence":
+        action, conf = ActionType.ALERT, max(0.82, sev)
+        reason = "Systemd unit file written — possible persistence installation"
+    elif et == "credential_theft_chain":
+        action, conf = ActionType.BLOCK, max(0.92, sev)
+        reason = "Credential theft chain — /etc/passwd read + outbound exfil detected"
+    elif et == "container_breakout":
+        action, conf = ActionType.KILL, max(0.97, sev)
+        reason = "Container namespace violation — host filesystem access from container"
+    elif et == "suid_binary_created":
+        action, conf = ActionType.QUARANTINE, max(0.88, sev)
+        reason = "SUID binary created in /tmp — privilege escalation staging"
+    elif et == "dependency_down":
+        action, conf = ActionType.LOG, min(0.4, sev)
+        reason = "Inference endpoint unreachable — safe degradation mode active"
     else:
         action, conf = ActionType.ALERT, min(0.6, sev)
         reason = "Unknown event type — escalating for review"
