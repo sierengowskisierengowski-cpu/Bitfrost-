@@ -150,9 +150,60 @@ def init_database():
             ON actions(event_id);
     """)
 
+    _normalize_compressed_event_rows(conn)
+
     conn.commit()
     conn.close()
     return str(DB_PATH)
+
+
+def _normalize_compressed_event(value):
+    if value is None:
+        return None
+
+    if not isinstance(value, str):
+        return json.dumps(value)
+
+    normalized = value
+    while True:
+        try:
+            decoded = json.loads(normalized)
+        except json.JSONDecodeError:
+            return normalized
+
+        if isinstance(decoded, str):
+            stripped = decoded.strip()
+            if stripped.startswith("{") or stripped.startswith("["):
+                normalized = decoded
+                continue
+            return normalized
+
+        if isinstance(decoded, (dict, list)):
+            return json.dumps(decoded)
+
+        return normalized
+
+
+def _normalize_compressed_event_rows(conn):
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, compressed_event
+        FROM events
+        WHERE compressed_event IS NOT NULL
+    """)
+
+    updates = []
+    for event_id, compressed_event in cursor.fetchall():
+        normalized = _normalize_compressed_event(compressed_event)
+        if normalized != compressed_event:
+            updates.append((normalized, event_id))
+
+    if updates:
+        cursor.executemany("""
+            UPDATE events
+            SET compressed_event = ?
+            WHERE id = ?
+        """, updates)
 
 
 def banner(config):
@@ -655,7 +706,7 @@ class EventRouter(threading.Thread):
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
                 timestamp, source, boundary, raw,
-                compressed if isinstance(compressed, str) else json.dumps(compressed),
+                _normalize_compressed_event(compressed),
                 json.dumps(decision) if decision else None,
                 action
             ))
