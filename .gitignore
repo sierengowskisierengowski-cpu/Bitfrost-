@@ -1,3 +1,5 @@
 .coverage
 htmlcov/
 .mypy_cache/
+heimdall_config.json
+heimdall_config.sha256
