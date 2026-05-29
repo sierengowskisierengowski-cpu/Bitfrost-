@@ -699,16 +699,22 @@ class EventRouter(threading.Thread):
             self.log.error(f"DB store error: {e}")
             return -1
 
-    def _put_with_backpressure(self, queue: Queue, item: dict, queue_name: str) -> bool:
+    def _put_with_backpressure(self, queue: Queue, item: dict, queue_label: str):
+        warned = False
         while True:
             try:
                 queue.put(item, timeout=0.2)
-                return True
+                if warned:
+                    self.log.info(
+                        f"{queue_label} accepted work. Backpressure released."
+                    )
+                return
             except Full:
-                self.log.warning(
-                    f"{queue_name} full. Applying backpressure to upstream stage."
-                )
-        return False
+                if not warned:
+                    self.log.warning(
+                        f"{queue_label} full. Applying backpressure to upstream stage."
+                    )
+                    warned = True
 
     def _record_metrics(self):
         self.event_count += 1
@@ -733,7 +739,12 @@ class EventRouter(threading.Thread):
         if boundary == "HONEYPOT" and not self._is_honeypot_breakout(event):
             self._put_with_backpressure(
                 self.storage_queue,
-                {"event": event, "compressed": None, "decision": None},
+                {
+                    "event": event,
+                    "compressed": None,
+                    "decision": None,
+                    "source_queue": self.queue,
+                },
                 "router.storage_queue"
             )
             return
@@ -741,7 +752,7 @@ class EventRouter(threading.Thread):
         self.log.info(f"[{boundary}] [{source}] Routing to Heimdall.")
         self._put_with_backpressure(
             self.compress_queue,
-            {"event": event},
+            {"event": event, "source_queue": self.queue},
             "router.compress_queue"
         )
 
@@ -820,7 +831,7 @@ class EventRouter(threading.Thread):
             except Exception as e:
                 self.log.error(f"Storage worker error: {e}")
             finally:
-                self.queue.task_done()
+                payload.get("source_queue", self.queue).task_done()
                 self.storage_queue.task_done()
 
     def _start_pipeline_workers(self):
@@ -855,12 +866,14 @@ class EventRouter(threading.Thread):
         self.log.info("EventRouter started. Bifrost pipeline active.")
         self._start_pipeline_workers()
 
-        while not SHUTDOWN.is_set() or not self.queue.empty():
+        while True:
             try:
                 event = self.queue.get(timeout=1.0)
                 self._record_metrics()
                 self._dispatch_event(event)
             except Empty:
+                if SHUTDOWN.is_set():
+                    break
                 continue
             except Exception as e:
                 self.log.error(f"EventRouter error: {e}")
