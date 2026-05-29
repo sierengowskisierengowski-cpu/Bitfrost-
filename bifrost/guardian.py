@@ -36,6 +36,7 @@ LOG_PATH = Path("~/Projects/bifrost/db/guardian.log").expanduser()
 
 EVENT_QUEUE = Queue(maxsize=10000)
 SHUTDOWN = threading.Event()
+COLLECTOR_STOP = threading.Event()
 
 METRICS_LOCK = threading.Lock()
 METRICS = {
@@ -278,12 +279,13 @@ class AuditdCollector(threading.Thread):
         self.log.info("AuditdCollector started.")
         warned_missing = False
 
-        while not SHUTDOWN.is_set():
+        while not COLLECTOR_STOP.is_set():
             if not self.AUDIT_LOG.exists():
                 if not warned_missing:
                     self.log.warning("auditd log not found. Is auditd running?")
                     warned_missing = True
-                time.sleep(self.RETRY_INTERVAL)
+                if COLLECTOR_STOP.wait(self.RETRY_INTERVAL):
+                    break
                 continue
 
             warned_missing = False
@@ -292,7 +294,7 @@ class AuditdCollector(threading.Thread):
                     f.seek(0, 2)
                     inode = os.fstat(f.fileno()).st_ino
 
-                    while not SHUTDOWN.is_set():
+                    while not COLLECTOR_STOP.is_set():
                         try:
                             current_inode = os.stat(self.AUDIT_LOG).st_ino
                             if current_inode != inode:
@@ -304,7 +306,8 @@ class AuditdCollector(threading.Thread):
 
                         line = f.readline()
                         if not line:
-                            time.sleep(0.1)
+                            if COLLECTOR_STOP.wait(0.1):
+                                break
                             continue
 
                         if any(key in line for key in [
@@ -319,10 +322,11 @@ class AuditdCollector(threading.Thread):
                             }
                             safe_enqueue(self.queue, event, "auditd", self.log)
             except OSError as e:
-                if SHUTDOWN.is_set():
+                if COLLECTOR_STOP.is_set():
                     break
                 self.log.error(f"AuditdCollector file error: {e}")
-                time.sleep(self.RETRY_INTERVAL)
+                if COLLECTOR_STOP.wait(self.RETRY_INTERVAL):
+                    break
             except Exception as e:
                 self.log.error(f"AuditdCollector unexpected error: {e}")
                 break
@@ -347,10 +351,11 @@ class HoneypotLogCollector(threading.Thread):
         try:
             with open(self.COWRIE_LOG, "r") as f:
                 f.seek(0, 2)
-                while not SHUTDOWN.is_set():
+                while not COLLECTOR_STOP.is_set():
                     line = f.readline()
                     if not line:
-                        time.sleep(0.1)
+                        if COLLECTOR_STOP.wait(0.1):
+                            break
                         continue
                     try:
                         entry = json.loads(line.strip())
@@ -382,7 +387,7 @@ class ProcessWatcher(threading.Thread):
 
     def run(self):
         self.log.info("ProcessWatcher started.")
-        while not SHUTDOWN.is_set():
+        while not COLLECTOR_STOP.is_set():
             try:
                 for pid_dir in Path("/proc").glob("[0-9]*"):
                     try:
@@ -457,7 +462,7 @@ class ProcessWatcher(threading.Thread):
                 except OSError as e:
                     self.log.warning(f"ProcessWatcher PID scan error: {e}")
 
-                SHUTDOWN.wait(self.POLL_INTERVAL)
+                COLLECTOR_STOP.wait(self.POLL_INTERVAL)
 
             except Exception as e:
                 self.log.error(f"ProcessWatcher loop error: {e}")
@@ -477,12 +482,12 @@ class NetworkWatcher(threading.Thread):
 
     def run(self):
         self.log.info("NetworkWatcher started.")
-        while not SHUTDOWN.is_set():
+        while not COLLECTOR_STOP.is_set():
             try:
                 self.scan_connections()
             except Exception as e:
                 self.log.error(f"NetworkWatcher scan error: {e}")
-            time.sleep(self.POLL_INTERVAL)
+            COLLECTOR_STOP.wait(self.POLL_INTERVAL)
 
     def hex_to_ip(self, hex_ip: str) -> str:
         try:
@@ -566,6 +571,15 @@ class EventRouter(threading.Thread):
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.execute("PRAGMA busy_timeout=5000")
+
+    def flush_db(self):
+        if not self.conn:
+            return
+        try:
+            self.conn.commit()
+            self.conn.execute("PRAGMA wal_checkpoint(FULL)")
+        except sqlite3.Error as e:
+            self.log.warning(f"DB flush error during shutdown: {e}")
 
     def setup_inference_clients(self):
         try:
@@ -756,18 +770,12 @@ class EventRouter(threading.Thread):
 
     def run(self):
         self.log.info("EventRouter started. Bifrost pipeline active.")
-        while not SHUTDOWN.is_set():
+        while not (SHUTDOWN.is_set() and self.queue.empty()):
+            event = None
             try:
                 event = self.queue.get(timeout=1.0)
                 boundary = event.get("boundary", "UNKNOWN")
                 source = event.get("source", "unknown")
-
-                self.event_count += 1
-                if self.event_count % 100 == 0:
-                    with METRICS_LOCK:
-                        self.log.info(
-                            f"Bifrost metrics: {json.dumps(METRICS)}"
-                        )
 
                 raw_data = event.get("raw", {})
                 is_breakout = (
@@ -780,7 +788,7 @@ class EventRouter(threading.Thread):
 
                 if boundary == "HONEYPOT" and not is_breakout:
                     self.store_event(event)
-                    self.queue.task_done()
+                    self.event_count += 1
                     continue
 
                 self.log.info(
@@ -809,20 +817,45 @@ class EventRouter(threading.Thread):
 
                 tier = decision.get("gjallarhorn_tier", 1)
                 self.log.info(f"Gjallarhorn Tier {tier} alert queued.")
-                self.queue.task_done()
+                self.event_count += 1
+
+                if self.event_count % 100 == 0:
+                    with METRICS_LOCK:
+                        self.log.info(
+                            f"Bifrost metrics: {json.dumps(METRICS)}"
+                        )
 
             except Empty:
                 continue
             except Exception as e:
                 self.log.error(f"EventRouter error: {e}")
+            finally:
+                if event is not None:
+                    self.queue.task_done()
 
+        self.flush_db()
         if self.conn:
             self.conn.close()
 
 
+def drain_event_queue(queue: Queue, timeout: float, poll_interval: float = 0.1):
+    """
+    Wait for all queued tasks to be marked done before the timeout expires.
+    Returns (drained, remaining_tasks).
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = queue.unfinished_tasks
+        if remaining <= 0:
+            return True, 0
+        if time.monotonic() >= deadline:
+            return False, remaining
+        time.sleep(poll_interval)
+
+
 def signal_handler(sig, frame):
     print("\n[*] Shutdown signal received. Draining queue...")
-    SHUTDOWN.set()
+    COLLECTOR_STOP.set()
 
 
 def main():
@@ -861,31 +894,37 @@ def main():
     log.info("Bifrost pipeline active.")
     log.info("Heimdall is online. The bridge is watched.")
 
-    while not SHUTDOWN.is_set():
+    while not COLLECTOR_STOP.is_set():
         time.sleep(1.0)
 
-    # Graceful shutdown — drain queue first
     log.info("Stopping collectors...")
     for collector in collectors:
         collector.join(timeout=2.0)
 
+    log.info("Stopping ingest server...")
+    ingest_server.stop()
+
     log.info("Draining event queue...")
-    drain_timeout = 10.0
-    drain_start = time.time()
-    while not EVENT_QUEUE.empty():
-        if time.time() - drain_start > drain_timeout:
-            log.warning("Queue drain timeout. Exiting.")
-            break
-        time.sleep(0.1)
+    drained, remaining = drain_event_queue(EVENT_QUEUE, timeout=10.0)
+    if drained:
+        log.info("Event queue drained successfully.")
+    else:
+        log.warning("Queue drain timeout. remaining_events=%d", remaining)
 
     log.info("Stopping router...")
+    SHUTDOWN.set()
     router.join(timeout=5.0)
     if router.is_alive():
         log.warning("Router still alive after shutdown timeout.")
 
-    ingest_server.stop()
-
+    remaining = EVENT_QUEUE.unfinished_tasks
     with METRICS_LOCK:
+        log.info(
+            "Shutdown summary: processed=%d dropped=%d remaining=%d",
+            router.event_count,
+            METRICS["events_dropped"],
+            remaining,
+        )
         log.info(f"Final metrics: {json.dumps(METRICS)}")
 
     log.info("Heimdall shutdown complete.")
