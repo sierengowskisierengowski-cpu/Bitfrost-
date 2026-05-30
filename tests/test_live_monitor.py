@@ -115,6 +115,10 @@ def test_live_monitor_audits_suppression_reasons(tmp_path):
 def test_human_formatter_includes_required_fields():
     record = {
         "timestamp": "2026-05-30T00:00:00Z",
+        "boundary": "HOST",
+        "source": "ingest",
+        "threat_class": "brute_force_ssh",
+        "confidence": 0.88,
         "host": "lab-node-1",
         "severity": "HIGH",
         "summary": "SSH brute-force detected against the lab host.",
@@ -126,6 +130,7 @@ def test_human_formatter_includes_required_fields():
         "repeat_count": 5,
         "repeat_window_seconds": 86400,
         "action_taken": "ALERT",
+        "outcome": "no_destructive_action",
         "test_mode": True,
     }
 
@@ -135,5 +140,7 @@ def test_human_formatter_includes_required_fields():
     assert "lab-node-1" in text
     assert "HIGH" in text
     assert "45.83.64.11" in text
+    assert "HOST/ingest" in text
+    assert "conf=0.88" in text
     assert "repeat / pattern new" in text
     assert "Action taken: ALERT" in text

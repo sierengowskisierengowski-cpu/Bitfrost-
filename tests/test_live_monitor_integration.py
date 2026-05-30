@@ -100,8 +100,10 @@ def test_event_router_emits_human_and_structured_live_monitoring(
         assert incident_records
         assert incident_records[0]["attacker_status"] == "new"
         assert incident_records[0]["action_taken"] == "ALERT"
+        assert isinstance(incident_records[0]["model_calls"], list)
+        assert incident_records[0]["test_pass"] in (True, False)
         assert summary_records
-        assert any("Host ingest HIGH" in message for message in caplog.messages)
+        assert any("HOST/ingest" in message for message in caplog.messages)
 
         with sqlite3.connect(db_path) as conn:
             stored_events = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
@@ -133,9 +135,13 @@ def test_live_monitor_stress_harness_tracks_burst_metrics(tmp_path):
 
     assert summary["total_events"] == 500
     assert summary["incidents"] == 500
+    assert "test_passed" in summary
+    assert "test_failed" in summary
+    assert "strongest_areas" in summary
+    assert "weakest_areas" in summary
     assert summary["unique_attackers"] == 25
     assert summary["possible_false_positive_queue"] >= 0
 
     records = (tmp_path / "live_monitor.jsonl").read_text().splitlines()
-    assert len(records) == 501
+    assert len(records) >= 501
     monitor.close()

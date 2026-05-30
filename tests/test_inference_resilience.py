@@ -173,3 +173,20 @@ def test_extractor_circuit_breaker_falls_back_to_deterministic(monkeypatch):
     assert first["extractor_model"] == "extractor-test"
     assert len(create_calls) == 1
     assert init_kwargs[0]["timeout"] == 2.0
+
+
+def test_get_client_timeout_uses_scalar_without_split():
+    timeout = inference_utils.get_client_timeout({"llm_timeout_seconds": 33})
+    assert timeout == 33.0
+
+
+def test_get_client_timeout_uses_split_values():
+    timeout = inference_utils.get_client_timeout(
+        {
+            "llm_timeout_seconds": 50,
+            "llm_connect_timeout_seconds": 10,
+            "llm_read_timeout_seconds": 120,
+        }
+    )
+    assert getattr(timeout, "connect", None) == 10.0
+    assert getattr(timeout, "read", None) == 120.0

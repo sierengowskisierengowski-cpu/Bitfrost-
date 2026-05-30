@@ -182,6 +182,67 @@ python -m bifrost.guardian --no-human-live
 python -m bifrost.guardian --live-monitor-json /tmp/live-monitor.jsonl
 ```
 
+### VM Testing Mode (48h live-fire)
+
+Use VM testing mode for CPU-only Ollama runs (for example VirtualBox + 8GB RAM):
+
+- config precedence is now `environment > vm_test_profile > default config`
+- when testing mode/profile is enabled, Guardian applies VM-safe defaults:
+  - Ollama host `http://127.0.0.1:11434`
+  - connect timeout `10s`, read/overall timeout `120s`
+  - context size `llm_num_ctx=1024`
+  - recommended Ollama parallelism `OLLAMA_NUM_PARALLEL=1`
+
+Enable with environment variables:
+
+```bash
+export HEIMDALL_TEST_MODE_ENABLED=true
+export HEIMDALL_CONFIG_PROFILE=vm-test
+export OLLAMA_HOST=http://127.0.0.1:11434
+export HEIMDALL_LLM_CONNECT_TIMEOUT_SECONDS=10
+export HEIMDALL_LLM_READ_TIMEOUT_SECONDS=120
+export HEIMDALL_LLM_TIMEOUT_SECONDS=120
+export HEIMDALL_LLM_NUM_CTX=1024
+export OLLAMA_NUM_PARALLEL=1
+```
+
+Systemd override example:
+
+```ini
+# /etc/systemd/system/bifrost-guardian.service.d/vm-testing.conf
+[Service]
+Environment="HEIMDALL_TEST_MODE_ENABLED=true"
+Environment="HEIMDALL_CONFIG_PROFILE=vm-test"
+Environment="OLLAMA_HOST=http://127.0.0.1:11434"
+Environment="HEIMDALL_LLM_CONNECT_TIMEOUT_SECONDS=10"
+Environment="HEIMDALL_LLM_READ_TIMEOUT_SECONDS=120"
+Environment="HEIMDALL_LLM_TIMEOUT_SECONDS=120"
+Environment="HEIMDALL_LLM_NUM_CTX=1024"
+Environment="OLLAMA_NUM_PARALLEL=1"
+```
+
+Then reload:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart bifrost-guardian
+```
+
+During testing mode:
+
+- human-readable live feed includes timestamp, severity marker, boundary/source,
+  threat class, confidence, action, and outcome.
+- structured JSONL (`live_monitor.jsonl`) includes incident records plus
+  pipeline-step records, model call metadata, pass/fail assessment, and periodic
+  strengths/weaknesses summaries.
+
+To disable and revert:
+
+```bash
+unset HEIMDALL_TEST_MODE_ENABLED HEIMDALL_CONFIG_PROFILE
+sudo systemctl restart bifrost-guardian
+```
+
 ### What operators see
 
 Each live line includes:

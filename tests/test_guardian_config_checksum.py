@@ -115,3 +115,47 @@ def test_init_database_normalizes_existing_double_encoded_rows(tmp_path, monkeyp
     conn.close()
 
     assert json.loads(stored) == {"event_type": "process", "pid": 5678}
+
+
+def test_load_config_applies_vm_profile_in_test_mode(tmp_path, monkeypatch):
+    payload = {
+        "test_mode_enabled": True,
+        "llm_timeout_seconds": 5.0,
+        "local_url": "http://localhost:11434/v1",
+    }
+    config_path = _write_config(tmp_path, payload)
+    monkeypatch.setattr(guardian, "CONFIG_PATH", config_path)
+    monkeypatch.setenv("HEIMDALL_ENV", "development")
+
+    loaded = guardian.load_config()
+
+    assert loaded["config_profile"] == "vm-test"
+    assert loaded["llm_timeout_seconds"] == 120.0
+    assert loaded["llm_connect_timeout_seconds"] == 10.0
+    assert loaded["llm_read_timeout_seconds"] == 120.0
+    assert loaded["llm_num_ctx"] == 1024
+    assert loaded["local_url"] == "http://127.0.0.1:11434/v1"
+
+
+def test_load_config_env_overrides_vm_profile_and_default(tmp_path, monkeypatch):
+    payload = {
+        "test_mode_enabled": True,
+        "llm_timeout_seconds": 5.0,
+        "llm_num_ctx": 4096,
+    }
+    config_path = _write_config(tmp_path, payload)
+    monkeypatch.setattr(guardian, "CONFIG_PATH", config_path)
+    monkeypatch.setenv("HEIMDALL_ENV", "development")
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+    monkeypatch.setenv("HEIMDALL_LLM_TIMEOUT_SECONDS", "77")
+    monkeypatch.setenv("HEIMDALL_LLM_CONNECT_TIMEOUT_SECONDS", "11")
+    monkeypatch.setenv("HEIMDALL_LLM_READ_TIMEOUT_SECONDS", "99")
+    monkeypatch.setenv("HEIMDALL_LLM_NUM_CTX", "1536")
+
+    loaded = guardian.load_config()
+
+    assert loaded["local_url"] == "http://127.0.0.1:11434/v1"
+    assert loaded["llm_timeout_seconds"] == 77.0
+    assert loaded["llm_connect_timeout_seconds"] == 11.0
+    assert loaded["llm_read_timeout_seconds"] == 99.0
+    assert loaded["llm_num_ctx"] == 1536

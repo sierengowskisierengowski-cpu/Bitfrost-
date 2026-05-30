@@ -20,7 +20,12 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from bifrost.inference import CircuitBreaker, execute_with_retry, get_request_timeout
+from bifrost.inference import (
+    CircuitBreaker,
+    execute_with_retry,
+    get_client_timeout,
+    get_request_timeout,
+)
 
 log = logging.getLogger("heimdall.extractor")
 
@@ -256,7 +261,7 @@ def compress_event(event: dict, config: dict) -> dict:
                 "local_url", "http://localhost:11434/v1"
             ),
             api_key="ollama",
-            timeout=get_request_timeout(config)
+            timeout=get_client_timeout(config)
         )
         log.debug(f"Model extraction: model={extractor_model}")
         return compress_event_with_model(event, client, extractor_model, config)

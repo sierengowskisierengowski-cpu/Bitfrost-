@@ -30,6 +30,14 @@ MAX_RETRIES = 2
 RETRY_DELAY = 1.0
 
 
+class SplitTimeout:
+    def __init__(self, *, connect: float, read: float):
+        self.connect = float(connect)
+        self.read = float(read)
+        self.write = float(read)
+        self.pool = float(connect)
+
+
 def get_request_timeout(config: Any = "TIER_4") -> float:
     """Return request timeout from config dict or hardware tier string."""
     if isinstance(config, dict):
@@ -40,6 +48,38 @@ def get_request_timeout(config: Any = "TIER_4") -> float:
     if isinstance(config, str):
         return TIER_TIMEOUTS.get(config, DEFAULT_TIMEOUT)
     return DEFAULT_TIMEOUT
+
+
+def get_client_timeout(config: Any = "TIER_4") -> Any:
+    """
+    Return timeout value for API clients.
+
+    Uses scalar timeout by default, or connect/read split timeout when
+    llm_connect_timeout_seconds / llm_read_timeout_seconds are configured.
+    """
+    timeout = get_request_timeout(config)
+    if not isinstance(config, dict):
+        return timeout
+
+    connect_timeout = config.get("llm_connect_timeout_seconds")
+    read_timeout = config.get("llm_read_timeout_seconds")
+    if connect_timeout is None and read_timeout is None:
+        return timeout
+
+    connect_timeout = float(connect_timeout or timeout)
+    read_timeout = float(read_timeout or timeout)
+
+    try:
+        import httpx
+
+        return httpx.Timeout(
+            connect=connect_timeout,
+            read=read_timeout,
+            write=read_timeout,
+            pool=connect_timeout,
+        )
+    except Exception:
+        return SplitTimeout(connect=connect_timeout, read=read_timeout)
 
 
 class CircuitBreaker:

@@ -7,7 +7,7 @@ import hashlib
 import json
 import logging
 import math
-from collections import OrderedDict, deque
+from collections import Counter, OrderedDict, deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Deque, Mapping
@@ -271,9 +271,21 @@ def normalize_monitor_event(
 
 
 def format_human_incident(record: Mapping[str, Any]) -> str:
+    severity = str(record.get("severity", "UNKNOWN")).upper()
+    severity_marker = {
+        "CRITICAL": "[!!!]",
+        "HIGH": "[!!]",
+        "MEDIUM": "[!]",
+        "LOW": "[-]",
+        "INFO": "[i]",
+    }.get(severity, "[?]")
     prefix = "[TEST MODE] " if record.get("test_mode") else ""
+    outcome = record.get("outcome", "n/a")
     return (
-        f"{prefix}{record['timestamp']} Host {record['host']} {record['severity']}: "
+        f"{severity_marker} {prefix}{record['timestamp']} "
+        f"{record['boundary']}/{record['source']} {record['threat_class']} "
+        f"conf={record['confidence']:.2f} action={record['action_taken']} outcome={outcome}. "
+        f"Host {record['host']} {record['severity']}: "
         f"{record['summary']} Source {record['attacker_identity']} is "
         f"{record['attacker_status']} / pattern {record['pattern_status']} "
         f"({record['recent_count']} in last {record['recent_window_seconds']}s, "
@@ -283,14 +295,19 @@ def format_human_incident(record: Mapping[str, Any]) -> str:
 
 
 def format_test_mode_summary(summary: Mapping[str, Any]) -> str:
+    strengths = ", ".join(summary.get("strongest_areas", [])[:2]) or "n/a"
+    weaknesses = ", ".join(summary.get("weakest_areas", [])[:2]) or "n/a"
     return (
         "[TEST MODE SUMMARY] "
         f"{summary['timestamp']} events={summary['total_events']} "
         f"incidents={summary['incidents']} blocked={summary['blocked_actions']} "
+        f"pass={summary.get('test_passed', 0)} fail={summary.get('test_failed', 0)} "
+        f"pass_rate={summary.get('test_pass_rate', 0.0):.2f} "
         f"unique_attackers={summary['unique_attackers']} repeats={summary['repeat_attackers']} "
         f"new={summary['new_attackers']} suppressed={summary['suppressed']} "
         f"possible_fp={summary['possible_false_positive_queue']} "
-        f"dropped={summary['dropped_events']} queue={summary['queue_size']}/{summary['queue_capacity']}"
+        f"dropped={summary['dropped_events']} queue={summary['queue_size']}/{summary['queue_capacity']} "
+        f"strengths={strengths} weaknesses={weaknesses}"
     )
 
 
@@ -366,6 +383,13 @@ class LiveMonitor:
         self._rule_windows: OrderedDict[str, Deque[float]] = OrderedDict()
         self._emit_history: OrderedDict[str, float] = OrderedDict()
         self._possible_false_positive_queue: OrderedDict[str, float] = OrderedDict()
+        self.test_passed = 0
+        self.test_failed = 0
+        self._failure_reasons: Counter[str] = Counter()
+        self._threat_totals: Counter[str] = Counter()
+        self._threat_failures: Counter[str] = Counter()
+        self._source_totals: Counter[str] = Counter()
+        self._source_failures: Counter[str] = Counter()
 
         self.structured_log_path = Path(
             self.config.get("live_monitor_jsonl_path")
@@ -431,6 +455,31 @@ class LiveMonitor:
             return
         self._structured_stream.write(json.dumps(payload, sort_keys=True) + "\n")
         self._structured_stream.flush()
+
+    def record_pipeline_step(
+        self,
+        event: Mapping[str, Any] | None,
+        *,
+        step: str,
+        status: str,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        if not self.enabled:
+            return
+        event = dict(event or {})
+        raw = event.get("raw")
+        raw = raw if isinstance(raw, dict) else {}
+        payload = {
+            "record_type": "pipeline_step",
+            "timestamp": _iso_zulu(datetime.now(timezone.utc)),
+            "event_id": str(event.get("event_id") or raw.get("event_id") or "unknown"),
+            "source": str(event.get("source") or "unknown"),
+            "boundary": str(event.get("boundary") or "UNKNOWN"),
+            "step": step,
+            "status": status,
+            "details": dict(details or {}),
+        }
+        self._write_structured(payload)
 
     def _evaluate_suppression(
         self,
@@ -576,9 +625,40 @@ class LiveMonitor:
             "unique_attackers": len(self._known_attackers),
             "unique_patterns": len(self._known_patterns),
             "suppression": suppression,
+            "model_calls": list(decision.get("model_calls", []))
+            if isinstance(decision, Mapping)
+            else [],
+            "outcome": str(
+                (decision or {}).get("execution_result")
+                or (decision or {}).get("policy_rationale")
+                or "n/a"
+            ),
             **self._queue_snapshot(),
             **base,
         }
+
+        test_fail_reasons: list[str] = []
+        if self.test_mode_enabled:
+            reasoning = str(record.get("decision_reasoning") or "").lower()
+            if reasoning.startswith("safe fallback:"):
+                test_fail_reasons.append("reasoner_fallback")
+            if record.get("outcome") == "dispatch_failed":
+                test_fail_reasons.append("executor_dispatch_failed")
+            for call in record["model_calls"]:
+                if not isinstance(call, Mapping):
+                    continue
+                if call.get("success") is False:
+                    test_fail_reasons.append(
+                        str(call.get("failure_reason") or "model_call_failed")
+                    )
+            if suppression["possible_false_positive"]:
+                test_fail_reasons.append("possible_false_positive")
+
+        test_pass = self.test_mode_enabled and not test_fail_reasons
+        test_fail = self.test_mode_enabled and not test_pass
+        record["test_pass"] = test_pass
+        record["test_fail"] = test_fail
+        record["test_fail_reasons"] = test_fail_reasons
 
         with METRICS_LOCK:
             METRICS["live_monitor_events"] += 1
@@ -588,6 +668,24 @@ class LiveMonitor:
                 METRICS["live_monitor_suppressed"] += 1
             if suppression["possible_false_positive"]:
                 METRICS["live_monitor_possible_false_positives"] += 1
+            METRICS.setdefault("live_monitor_test_passed", 0)
+            METRICS.setdefault("live_monitor_test_failed", 0)
+            if test_pass:
+                METRICS["live_monitor_test_passed"] += 1
+            if test_fail:
+                METRICS["live_monitor_test_failed"] += 1
+
+        if self.test_mode_enabled:
+            self._threat_totals[record["threat_class"]] += 1
+            self._source_totals[record["source"]] += 1
+            if test_fail:
+                self.test_failed += 1
+                self._threat_failures[record["threat_class"]] += 1
+                self._source_failures[record["source"]] += 1
+                for reason in test_fail_reasons:
+                    self._failure_reasons[reason] += 1
+            else:
+                self.test_passed += 1
 
         self._write_structured(record)
         if self.enabled and self.human_live_enabled and not suppression["suppressed"]:
@@ -598,6 +696,17 @@ class LiveMonitor:
 
     def build_summary(self, *, now: datetime | None = None) -> dict[str, Any]:
         now = now or datetime.now(timezone.utc)
+        strongest_areas = [
+            f"{name}:{count}"
+            for name, count in self._threat_totals.most_common(3)
+            if self._threat_failures.get(name, 0) == 0
+        ]
+        weakest_areas = [
+            f"{name}:{count}"
+            for name, count in self._failure_reasons.most_common(3)
+        ]
+        total_test = self.test_passed + self.test_failed
+        pass_rate = (self.test_passed / total_test) if total_test else 0.0
         summary = {
             "record_type": "summary",
             "test_mode": True,
@@ -612,6 +721,11 @@ class LiveMonitor:
             "new_patterns": self.new_patterns,
             "suppressed": self.suppressed,
             "possible_false_positive_queue": len(self._possible_false_positive_queue),
+            "test_passed": self.test_passed,
+            "test_failed": self.test_failed,
+            "test_pass_rate": pass_rate,
+            "strongest_areas": strongest_areas,
+            "weakest_areas": weakest_areas,
             "dropped_events": METRICS.get("events_dropped", 0),
             **self._queue_snapshot(),
         }

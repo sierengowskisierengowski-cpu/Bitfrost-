@@ -29,7 +29,12 @@ from datetime import datetime, timezone
 from queue import Queue, Empty
 
 from bifrost.event_queue import METRICS, METRICS_LOCK, safe_enqueue
-from bifrost.inference import CircuitBreaker, execute_with_retry, get_request_timeout
+from bifrost.inference import (
+    CircuitBreaker,
+    execute_with_retry,
+    get_client_timeout,
+    get_request_timeout,
+)
 from bifrost import paths as bifrost_paths
 from bifrost.resilience import (
     configure_sqlite_connection,
@@ -52,6 +57,16 @@ from bifrost.security import (
 )
 
 BIFROST_VERSION = "0.1.1"
+
+VM_TEST_PROFILE_DEFAULTS = {
+    "local_url": "http://127.0.0.1:11434/v1",
+    "llm_timeout_seconds": 120.0,
+    "llm_connect_timeout_seconds": 10.0,
+    "llm_read_timeout_seconds": 120.0,
+    "llm_num_ctx": 1024,
+    "ollama_num_parallel": 1,
+    "test_mode_enabled": True,
+}
 
 
 def refresh_runtime_paths(config=None):
@@ -131,6 +146,145 @@ def load_config():
         os.getenv("HEIMDALL_ENV", "production").strip().lower() == "production"
     )
 
+    def _parse_bool_env(*names):
+        for name in names:
+            raw = os.getenv(name)
+            if raw is None:
+                continue
+            value = raw.strip().lower()
+            if value in {"1", "true", "yes", "on"}:
+                return True
+            if value in {"0", "false", "no", "off"}:
+                return False
+        return None
+
+    def _parse_number_env(*names, cast=float):
+        for name in names:
+            raw = os.getenv(name)
+            if raw is None:
+                continue
+            try:
+                return cast(raw.strip())
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _normalize_local_url(value):
+        url = str(value or "").strip()
+        if not url:
+            return url
+        if url.endswith("/"):
+            url = url[:-1]
+        if not url.endswith("/v1"):
+            url = f"{url}/v1"
+        return url
+
+    def _resolve_testing_mode(base_config):
+        env_mode = _parse_bool_env(
+            "HEIMDALL_TEST_MODE_ENABLED",
+            "BIFROST_TEST_MODE_ENABLED",
+        )
+        if env_mode is not None:
+            return env_mode
+        return bool(base_config.get("test_mode_enabled", False))
+
+    def _resolve_profile_name(base_config):
+        for env_name in (
+            "HEIMDALL_CONFIG_PROFILE",
+            "BIFROST_CONFIG_PROFILE",
+            "HEIMDALL_TEST_PROFILE",
+            "BIFROST_TEST_PROFILE",
+        ):
+            profile = os.getenv(env_name, "").strip()
+            if profile:
+                return profile.lower()
+        profile = str(base_config.get("config_profile") or "").strip().lower()
+        return profile
+
+    def _apply_vm_profile(base_config):
+        merged = dict(base_config)
+        vm_profile = dict(VM_TEST_PROFILE_DEFAULTS)
+        vm_profile.update(base_config.get("vm_test_profile", {}))
+        merged.update(vm_profile)
+        merged["local_url"] = _normalize_local_url(merged.get("local_url"))
+        return merged
+
+    def _apply_env_overrides(base_config):
+        merged = dict(base_config)
+        ollama_host = os.getenv("OLLAMA_HOST", "").strip()
+        if ollama_host:
+            merged["local_url"] = _normalize_local_url(ollama_host)
+
+        local_url = os.getenv("HEIMDALL_LOCAL_URL", "").strip() or os.getenv(
+            "BIFROST_LOCAL_URL", ""
+        ).strip()
+        if local_url:
+            merged["local_url"] = _normalize_local_url(local_url)
+
+        timeout_val = _parse_number_env(
+            "HEIMDALL_LLM_TIMEOUT_SECONDS",
+            "BIFROST_LLM_TIMEOUT_SECONDS",
+            cast=float,
+        )
+        if timeout_val is not None:
+            merged["llm_timeout_seconds"] = float(timeout_val)
+
+        connect_val = _parse_number_env(
+            "HEIMDALL_LLM_CONNECT_TIMEOUT_SECONDS",
+            "BIFROST_LLM_CONNECT_TIMEOUT_SECONDS",
+            cast=float,
+        )
+        if connect_val is not None:
+            merged["llm_connect_timeout_seconds"] = float(connect_val)
+
+        read_val = _parse_number_env(
+            "HEIMDALL_LLM_READ_TIMEOUT_SECONDS",
+            "BIFROST_LLM_READ_TIMEOUT_SECONDS",
+            cast=float,
+        )
+        if read_val is not None:
+            merged["llm_read_timeout_seconds"] = float(read_val)
+
+        num_ctx_val = _parse_number_env(
+            "HEIMDALL_LLM_NUM_CTX",
+            "BIFROST_LLM_NUM_CTX",
+            cast=int,
+        )
+        if num_ctx_val is not None:
+            merged["llm_num_ctx"] = int(num_ctx_val)
+
+        parallel_val = _parse_number_env(
+            "OLLAMA_NUM_PARALLEL",
+            "HEIMDALL_OLLAMA_NUM_PARALLEL",
+            "BIFROST_OLLAMA_NUM_PARALLEL",
+            cast=int,
+        )
+        if parallel_val is not None:
+            merged["ollama_num_parallel"] = int(parallel_val)
+
+        test_mode_val = _parse_bool_env(
+            "HEIMDALL_TEST_MODE_ENABLED",
+            "BIFROST_TEST_MODE_ENABLED",
+        )
+        if test_mode_val is not None:
+            merged["test_mode_enabled"] = test_mode_val
+
+        if merged.get("local_url"):
+            merged["local_url"] = _normalize_local_url(merged.get("local_url"))
+        return merged
+
+    def _finalize_config(base_config):
+        merged = dict(base_config)
+        testing_mode = _resolve_testing_mode(merged)
+        profile_name = _resolve_profile_name(merged)
+        if testing_mode:
+            merged["test_mode_enabled"] = True
+        if testing_mode or profile_name in {"vm", "vm-test", "vm_test"}:
+            merged = _apply_vm_profile(merged)
+            merged["config_profile"] = "vm-test"
+        merged = _apply_env_overrides(merged)
+        return merged
+
     if not CONFIG_PATH.exists():
         print("[!] heimdall_config.json not found.")
         print("[!] Run python setup.py first.")
@@ -151,7 +305,7 @@ def load_config():
             "Config checksum file missing; skipping integrity verification "
             "in non-production mode."
         )
-        return config
+        return _finalize_config(config)
 
     import hashlib
     actual = hashlib.sha256(CONFIG_PATH.read_bytes()).hexdigest()
@@ -162,7 +316,7 @@ def load_config():
         sys.exit(1)
     log.info("Config integrity verified.")
 
-    return config
+    return _finalize_config(config)
 
 
 def init_database():
@@ -642,6 +796,8 @@ class EventRouter(threading.Thread):
         self.config_integrity_ok = True
         self.extractor_breaker = CircuitBreaker("guardian_extractor")
         self.analyst_breaker = CircuitBreaker("guardian_analyst")
+        self._last_extractor_call_meta = {}
+        self._last_analyst_call_meta = {}
         self.setup_inference_clients()
         self.setup_db()
         self.live_monitor = LiveMonitor(self.config, self.log, queue=self.queue)
@@ -673,7 +829,7 @@ class EventRouter(threading.Thread):
     def setup_inference_clients(self):
         try:
             from openai import OpenAI
-            timeout = get_request_timeout(self.config)
+            timeout = get_client_timeout(self.config)
             if self.config.get("use_local_llm"):
                 self.analyst_client = OpenAI(
                     base_url=self.config["local_url"],
@@ -704,50 +860,93 @@ class EventRouter(threading.Thread):
 
     def compress_event(self, event: dict) -> str:
         if not self.extractor_client:
+            self._last_extractor_call_meta = {
+                "provider": "guardian_extractor",
+                "model": self.extractor_model,
+                "latency_ms": 0.0,
+                "timeout_seconds": float(get_request_timeout(self.config)),
+                "retry_attempts": int(self.config.get("llm_retry_attempts", 2)),
+                "success": False,
+                "failure_reason": "no_extractor_client",
+            }
             raw = safe_json_dumps(event.get("raw", {}))
             return sanitize_telemetry_for_llm(raw)[:500]
 
         try:
+            start = time.monotonic()
             raw = sanitize_telemetry_for_llm(
                 safe_json_dumps(event.get("raw", {}))
             )
+            num_ctx = int(self.config.get("llm_num_ctx", 0) or 0)
+            options = {"num_ctx": num_ctx} if num_ctx > 0 else None
+            completion_kwargs = {
+                "model": self.extractor_model,
+                "temperature": 0.0,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a security event compressor. "
+                            "Strip hex addresses and register states. "
+                            "Return compact JSON only. No explanation."
+                        ),
+                    },
+                    {"role": "user", "content": raw},
+                ],
+            }
+            if options:
+                completion_kwargs["extra_body"] = {"options": options}
             response, error = execute_with_retry(
-                lambda: self.extractor_client.chat.completions.create(
-                    model=self.extractor_model,
-                    temperature=0.0,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You are a security event compressor. "
-                                "Strip hex addresses and register states. "
-                                "Return compact JSON only. No explanation."
-                            ),
-                        },
-                        {"role": "user", "content": raw},
-                    ],
-                ),
+                lambda: self.extractor_client.chat.completions.create(**completion_kwargs),
                 provider="guardian_extractor",
                 config=self.config,
                 logger=self.log,
                 circuit_breaker=self.extractor_breaker,
             )
+            latency_ms = (time.monotonic() - start) * 1000.0
             if not response:
                 reason = (
                     "extractor_circuit_open"
                     if error == "circuit_open"
                     else "extractor_error"
                 )
+                self._last_extractor_call_meta = {
+                    "provider": "guardian_extractor",
+                    "model": self.extractor_model,
+                    "latency_ms": round(latency_ms, 2),
+                    "timeout_seconds": float(get_request_timeout(self.config)),
+                    "retry_attempts": int(self.config.get("llm_retry_attempts", 2)),
+                    "success": False,
+                    "failure_reason": reason,
+                }
                 self.log.warning("Extractor degraded mode: %s", reason)
                 with METRICS_LOCK:
                     METRICS["llm_errors"] += 1
                 return sanitize_telemetry_for_llm(
                     safe_json_dumps(event.get("raw", {}))
                 )[:500]
+            self._last_extractor_call_meta = {
+                "provider": "guardian_extractor",
+                "model": self.extractor_model,
+                "latency_ms": round(latency_ms, 2),
+                "timeout_seconds": float(get_request_timeout(self.config)),
+                "retry_attempts": int(self.config.get("llm_retry_attempts", 2)),
+                "success": True,
+                "failure_reason": None,
+            }
             return sanitize_telemetry_for_llm(
                 response.choices[0].message.content.strip()
             )
         except Exception as e:
+            self._last_extractor_call_meta = {
+                "provider": "guardian_extractor",
+                "model": self.extractor_model,
+                "latency_ms": 0.0,
+                "timeout_seconds": float(get_request_timeout(self.config)),
+                "retry_attempts": int(self.config.get("llm_retry_attempts", 2)),
+                "success": False,
+                "failure_reason": str(e),
+            }
             self.log.warning(f"Extractor error: {e}. Using raw fallback.")
             with METRICS_LOCK:
                 METRICS["llm_errors"] += 1
@@ -757,6 +956,15 @@ class EventRouter(threading.Thread):
 
     def route_to_heimdall(self, compressed: str) -> dict:
         if not self.analyst_client:
+            self._last_analyst_call_meta = {
+                "provider": "guardian_analyst",
+                "model": self.analyst_model,
+                "latency_ms": 0.0,
+                "timeout_seconds": float(get_request_timeout(self.config)),
+                "retry_attempts": int(self.config.get("llm_retry_attempts", 2)),
+                "success": False,
+                "failure_reason": "no_analyst_client",
+            }
             return self._safe_fallback("no_analyst_client")
 
         try:
@@ -764,27 +972,43 @@ class EventRouter(threading.Thread):
                 "system_baseline", ""
             )
             sanitized = sanitize_telemetry_for_llm(compressed)
+            start = time.monotonic()
+            num_ctx = int(self.config.get("llm_num_ctx", 0) or 0)
+            options = {"num_ctx": num_ctx} if num_ctx > 0 else None
+            completion_kwargs = {
+                "model": self.analyst_model,
+                "temperature": 0.0,
+                "messages": [
+                    {"role": "system", "content": baseline},
+                    {
+                        "role": "user",
+                        "content": (
+                            "Analyze this security event as JSON:\n"
+                            f"{sanitized}"
+                        ),
+                    },
+                ],
+            }
+            if options:
+                completion_kwargs["extra_body"] = {"options": options}
             response, error = execute_with_retry(
-                lambda: self.analyst_client.chat.completions.create(
-                    model=self.analyst_model,
-                    temperature=0.0,
-                    messages=[
-                        {"role": "system", "content": baseline},
-                        {
-                            "role": "user",
-                            "content": (
-                                "Analyze this security event as JSON:\n"
-                                f"{sanitized}"
-                            ),
-                        },
-                    ],
-                ),
+                lambda: self.analyst_client.chat.completions.create(**completion_kwargs),
                 provider="guardian_analyst",
                 config=self.config,
                 logger=self.log,
                 circuit_breaker=self.analyst_breaker,
             )
+            latency_ms = (time.monotonic() - start) * 1000.0
             if not response:
+                self._last_analyst_call_meta = {
+                    "provider": "guardian_analyst",
+                    "model": self.analyst_model,
+                    "latency_ms": round(latency_ms, 2),
+                    "timeout_seconds": float(get_request_timeout(self.config)),
+                    "retry_attempts": int(self.config.get("llm_retry_attempts", 2)),
+                    "success": False,
+                    "failure_reason": error or "llm_error",
+                }
                 with METRICS_LOCK:
                     METRICS["llm_errors"] += 1
                 if error == "circuit_open":
@@ -823,15 +1047,42 @@ class EventRouter(threading.Thread):
 
             with METRICS_LOCK:
                 METRICS["decisions_made"] += 1
+            self._last_analyst_call_meta = {
+                "provider": "guardian_analyst",
+                "model": self.analyst_model,
+                "latency_ms": round(latency_ms, 2),
+                "timeout_seconds": float(get_request_timeout(self.config)),
+                "retry_attempts": int(self.config.get("llm_retry_attempts", 2)),
+                "success": True,
+                "failure_reason": None,
+            }
 
             return decision
 
         except json.JSONDecodeError as e:
+            self._last_analyst_call_meta = {
+                "provider": "guardian_analyst",
+                "model": self.analyst_model,
+                "latency_ms": 0.0,
+                "timeout_seconds": float(get_request_timeout(self.config)),
+                "retry_attempts": int(self.config.get("llm_retry_attempts", 2)),
+                "success": False,
+                "failure_reason": "json_decode_error",
+            }
             self.log.error(f"LLM returned invalid JSON: {e}")
             with METRICS_LOCK:
                 METRICS["llm_errors"] += 1
             return self._safe_fallback("json_decode_error")
         except Exception as e:
+            self._last_analyst_call_meta = {
+                "provider": "guardian_analyst",
+                "model": self.analyst_model,
+                "latency_ms": 0.0,
+                "timeout_seconds": float(get_request_timeout(self.config)),
+                "retry_attempts": int(self.config.get("llm_retry_attempts", 2)),
+                "success": False,
+                "failure_reason": str(e),
+            }
             self.log.error(f"Heimdall reasoning error: {e}")
             with METRICS_LOCK:
                 METRICS["llm_errors"] += 1
@@ -1025,36 +1276,36 @@ class EventRouter(threading.Thread):
 
         return decision
 
-    def maybe_dispatch_to_executor(self, decision: dict, event_id: int) -> None:
+    def maybe_dispatch_to_executor(self, decision: dict, event_id: int) -> str:
         """Send policy-approved destructive actions to the Go executor."""
         if event_id < 1:
             self.log.error(
                 "Executor dispatch blocked: event not persisted (event_id=%s)",
                 event_id,
             )
-            return
+            return "event_not_persisted"
         if not self.db_healthy:
             self.log.error(
                 "Executor dispatch blocked: database unhealthy (event_id=%d)",
                 event_id,
             )
-            return
+            return "database_unhealthy"
         if not self.check_runtime_integrity():
             self.log.error(
                 "Executor dispatch blocked: runtime integrity check failed "
                 "(event_id=%d)",
                 event_id,
             )
-            return
+            return "integrity_check_failed"
         if not decision.get("policy_allowed"):
-            return
+            return "blocked_by_policy"
 
         effective = (
             decision.get("action_effective")
             or decision.get("action_required", "NONE")
         )
         if effective not in ("KILL", "BLOCK", "QUARANTINE"):
-            return
+            return "no_destructive_action"
 
         from bifrost.router import execute_decision
 
@@ -1070,6 +1321,7 @@ class EventRouter(threading.Thread):
                 dispatch_payload.get("target"),
                 event_id,
             )
+            return "dispatch_success"
         else:
             self.log.error(
                 "Executor dispatch failed: %s target=%s event_id=%d",
@@ -1077,6 +1329,7 @@ class EventRouter(threading.Thread):
                 dispatch_payload.get("target"),
                 event_id,
             )
+            return "dispatch_failed"
 
     def store_event(self, event: dict, compressed=None, decision=None) -> int:
         if not self.db_healthy:
@@ -1171,11 +1424,47 @@ class EventRouter(threading.Thread):
                     f"[{boundary}] [{source}] Routing to Heimdall."
                 )
 
+                self.live_monitor.record_pipeline_step(
+                    event,
+                    step="route_start",
+                    status="ok",
+                    details={"boundary": boundary, "source": source},
+                )
                 compressed = self.compress_event(event)
+                self.live_monitor.record_pipeline_step(
+                    event,
+                    step="compress_event",
+                    status="ok",
+                    details={"model_call": self._last_extractor_call_meta},
+                )
                 decision = self.route_to_heimdall(compressed)
+                decision["model_calls"] = [
+                    self._last_extractor_call_meta,
+                    self._last_analyst_call_meta,
+                ]
+                self.live_monitor.record_pipeline_step(
+                    event,
+                    step="reason_decision",
+                    status="ok",
+                    details={"model_call": self._last_analyst_call_meta},
+                )
                 decision = self.apply_policy_gate(decision, event)
+                self.live_monitor.record_pipeline_step(
+                    event,
+                    step="policy_gate",
+                    status="ok",
+                    details={
+                        "policy_allowed": decision.get("policy_allowed"),
+                        "policy_rationale": decision.get("policy_rationale"),
+                    },
+                )
                 event_id = self.store_event(event, compressed, decision)
-                self.live_monitor.record_event(event, decision)
+                self.live_monitor.record_pipeline_step(
+                    event,
+                    step="store_event",
+                    status="ok" if event_id > 0 else "error",
+                    details={"event_id": event_id},
+                )
 
                 severity = decision.get("severity", "UNKNOWN")
                 action = decision.get("action_requested", decision.get("action_required", "NONE"))
@@ -1199,7 +1488,15 @@ class EventRouter(threading.Thread):
                             f"{decision.get('policy_rationale', '')}"
                         )
 
-                self.maybe_dispatch_to_executor(decision, event_id)
+                execution_result = self.maybe_dispatch_to_executor(decision, event_id)
+                decision["execution_result"] = execution_result
+                self.live_monitor.record_pipeline_step(
+                    event,
+                    step="executor_dispatch",
+                    status="ok" if execution_result != "dispatch_failed" else "error",
+                    details={"execution_result": execution_result},
+                )
+                self.live_monitor.record_event(event, decision)
 
                 tier = decision.get("gjallarhorn_tier", 1)
                 self.log.info(f"Gjallarhorn Tier {tier} alert queued.")

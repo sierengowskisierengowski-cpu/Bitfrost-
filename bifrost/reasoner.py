@@ -111,6 +111,7 @@ from bifrost.security import TELEMETRY_TRUST_PREAMBLE, sanitize_telemetry_for_ll
 from bifrost.inference import (
     CircuitBreaker,
     execute_with_retry,
+    get_client_timeout,
     get_request_timeout,
 )
 
@@ -362,21 +363,26 @@ def route_to_ollama(
         client = OpenAI(
             base_url=config.get("local_url", "http://localhost:11434/v1"),
             api_key="ollama",
-            timeout=get_request_timeout(config)
+            timeout=get_client_timeout(config)
         )
         model = config.get("analyst_model")
         if not model:
             return None
 
+        num_ctx = int(config.get("llm_num_ctx", 0) or 0)
+        completion_kwargs = {
+            "model": model,
+            "temperature": 0.0,
+            "messages": [
+                {"role": "system", "content": system_baseline},
+                {"role": "user", "content": prompt}
+            ],
+        }
+        if num_ctx > 0:
+            completion_kwargs["extra_body"] = {"options": {"num_ctx": num_ctx}}
+
         response, _ = execute_with_retry(
-            lambda: client.chat.completions.create(
-                model=model,
-                temperature=0.0,
-                messages=[
-                    {"role": "system", "content": system_baseline},
-                    {"role": "user", "content": prompt}
-                ]
-            ),
+            lambda: client.chat.completions.create(**completion_kwargs),
             provider="ollama",
             config=config,
             logger=log,
@@ -414,7 +420,7 @@ def route_to_groq(
                 "groq_url", "https://api.groq.com/openai/v1"
             ),
             api_key=api_key,
-            timeout=get_request_timeout(config)
+            timeout=get_client_timeout(config)
         )
         model = config.get("groq_model", "llama-3.3-70b-versatile")
 
