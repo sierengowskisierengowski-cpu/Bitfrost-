@@ -1,7 +1,7 @@
 .PHONY: demo-benign demo-portscan demo-spawn demo-mdrfckr \
         demo-initial-access demo-exec demo-persistence demo-cred \
         demo-lateral demo-suid demo-burst demo-depdown \
-        demo-all-attacks test clean
+        demo-all-attacks test lab-validate lab-validate-reset clean
 
 demo-benign:
 	python3 -m bifrost.demo --scenario examples/replay/benign_web_burst.jsonl
@@ -50,6 +50,12 @@ demo-all-attacks:
 
 test:
 	python3 -m pytest tests/ -v
+
+lab-validate:
+	python3 -m lab.validate
+
+lab-validate-reset:
+	python3 -m lab.validate --reset-lock
 
 clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true

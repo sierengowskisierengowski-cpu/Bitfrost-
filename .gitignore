@@ -44,3 +44,7 @@ node_modules/
 
 # Test attack framework (local lab only)
 tests/attack_framework/
+
+# Build validation facility artifacts (build-scoped, not committed)
+lab/.build_lock
+lab/reports/
