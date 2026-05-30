@@ -1,6 +1,7 @@
 .PHONY: demo-benign demo-portscan demo-spawn demo-mdrfckr \
         demo-initial-access demo-exec demo-persistence demo-cred \
         demo-lateral demo-suid demo-burst demo-depdown \
+        demo-kill-chain demo-kernel \
         demo-all-attacks test lab-validate lab-validate-reset clean
 
 demo-benign:
@@ -39,6 +40,12 @@ demo-burst:
 demo-depdown:
 	python3 -m bifrost.demo --scenario examples/replay/ingest_dependency_down.jsonl
 
+demo-kill-chain:
+	python3 -m bifrost.demo --scenario examples/replay/full_kill_chain.jsonl
+
+demo-kernel:
+	python3 -m bifrost.demo --scenario examples/replay/kernel_masquerade.jsonl
+
 demo-all-attacks:
 	python3 -m bifrost.demo --scenario examples/replay/initial_access.jsonl
 	python3 -m bifrost.demo --scenario examples/replay/execution_tmp_exec.jsonl
@@ -47,6 +54,8 @@ demo-all-attacks:
 	python3 -m bifrost.demo --scenario examples/replay/port_scan.jsonl
 	python3 -m bifrost.demo --scenario examples/replay/lateral_movement.jsonl
 	python3 -m bifrost.demo --scenario examples/replay/suid_binary.jsonl
+	python3 -m bifrost.demo --scenario examples/replay/full_kill_chain.jsonl
+	python3 -m bifrost.demo --scenario examples/replay/kernel_masquerade.jsonl
 
 test:
 	@test -x .venv/bin/python3 || python3 -m venv .venv

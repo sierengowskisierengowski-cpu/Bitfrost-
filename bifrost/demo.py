@@ -80,6 +80,15 @@ def simple_detect(event):
     elif et == "dependency_down":
         action, conf = ActionType.LOG, min(0.4, sev)
         reason = "Inference endpoint unreachable — safe degradation mode active"
+    elif et == "dns_tunnel_pivot":
+        action, conf = ActionType.BLOCK, max(0.94, sev)
+        reason = "DNS tunnel C2 pivot after Cowrie login — automated callback confirmed"
+    elif et in ("sensitive_file_write", "sensitive_file_read"):
+        action, conf = ActionType.QUARANTINE, max(0.87, sev)
+        reason = "Write/read to sensitive system file — credential or config tampering"
+    elif et == "kernel_thread_masquerade":
+        action, conf = ActionType.KILL, max(0.91, sev)
+        reason = "Userspace process masquerading as kernel thread — rootkit indicator"
     else:
         action, conf = ActionType.ALERT, min(0.6, sev)
         reason = "Unknown event type — escalating for review"

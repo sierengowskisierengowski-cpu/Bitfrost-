@@ -33,10 +33,12 @@ def _parse_timestamp(value: Any) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
-def _load_incident_records(jsonl_path: Path) -> list[dict[str, Any]]:
+def _load_jsonl_records(jsonl_path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return (incidents, summaries) loaded from the live_monitor JSONL file."""
     if not jsonl_path.exists():
-        return []
+        return [], []
     incidents: list[dict[str, Any]] = []
+    summaries: list[dict[str, Any]] = []
     for line in jsonl_path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
@@ -44,14 +46,26 @@ def _load_incident_records(jsonl_path: Path) -> list[dict[str, Any]]:
             record = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if record.get("record_type") != "incident":
-            continue
-        incident = dict(record)
-        incident["_timestamp_dt"] = _parse_timestamp(record.get("timestamp"))
-        incidents.append(incident)
+        rtype = record.get("record_type")
+        if rtype == "incident":
+            incident = dict(record)
+            incident["_timestamp_dt"] = _parse_timestamp(record.get("timestamp"))
+            incidents.append(incident)
+        elif rtype == "summary":
+            summary = dict(record)
+            summary["_timestamp_dt"] = _parse_timestamp(record.get("timestamp"))
+            summaries.append(summary)
     incidents.sort(
         key=lambda item: item.get("_timestamp_dt") or datetime.max.replace(tzinfo=timezone.utc)
     )
+    summaries.sort(
+        key=lambda item: item.get("_timestamp_dt") or datetime.max.replace(tzinfo=timezone.utc)
+    )
+    return incidents, summaries
+
+
+def _load_incident_records(jsonl_path: Path) -> list[dict[str, Any]]:
+    incidents, _ = _load_jsonl_records(jsonl_path)
     return incidents
 
 
@@ -102,7 +116,7 @@ def build_dashboard_state(
     now = now or datetime.now(timezone.utc)
     db_path = Path(db_path)
     jsonl_path = Path(live_monitor_jsonl_path)
-    incidents = _load_incident_records(jsonl_path)
+    incidents, summaries = _load_jsonl_records(jsonl_path)
     recent_incidents = list(reversed(incidents[-max(int(incident_limit), 1):]))
 
     severity_counts: Counter[str] = Counter()
@@ -134,6 +148,15 @@ def build_dashboard_state(
     for incident in recent_incidents:
         incident.pop("_timestamp_dt", None)
 
+    # Build test-mode summary data from the latest summary record
+    latest_test_summary: dict[str, Any] = {}
+    recent_summaries: list[dict[str, Any]] = []
+    if summaries:
+        latest = summaries[-1]
+        latest_test_summary = {k: v for k, v in latest.items() if not k.startswith("_")}
+        for s in summaries[-10:]:
+            recent_summaries.append({k: v for k, v in s.items() if not k.startswith("_")})
+
     return {
         "generated_at": now.isoformat().replace("+00:00", "Z"),
         "paths": {
@@ -160,6 +183,11 @@ def build_dashboard_state(
         "timeline": _summarize_timeline(incidents, now=now),
         "allowlist": sorted(str(item) for item in (monitor_safelist or []) if str(item).strip()),
         "incidents": recent_incidents,
+        "test_mode": {
+            "active": bool(latest_test_summary),
+            "latest_summary": latest_test_summary,
+            "recent_summaries": recent_summaries,
+        },
     }
 
 
@@ -181,6 +209,69 @@ def _render_ranked(title: str, rows: list[dict[str, Any]], key_name: str = "name
         "<table><thead><tr><th>Name</th><th>Count</th></tr></thead>"
         f"<tbody>{items or '<tr><td colspan=2>None</td></tr>'}</tbody></table></section>"
     )
+
+
+def _render_test_mode_panel(test_mode: Mapping[str, Any]) -> str:
+    if not test_mode.get("active"):
+        return (
+            "<section><h2>Test Run Status</h2>"
+            "<p style='color:#64748b'>No test-mode summary records found. "
+            "Start Guardian with <code>--test-mode</code> to enable live-fire tracking.</p>"
+            "</section>"
+        )
+    s = test_mode.get("latest_summary") or {}
+    total = (s.get("test_passed") or 0) + (s.get("test_failed") or 0)
+    pass_rate = s.get("test_pass_rate", 0.0)
+    pass_pct = f"{pass_rate * 100:.1f}%"
+    bar_color = "#22c55e" if pass_rate >= 0.8 else ("#f59e0b" if pass_rate >= 0.5 else "#ef4444")
+    bar_pct = int(pass_rate * 100)
+
+    strengths = ", ".join(s.get("strongest_areas") or []) or "n/a"
+    weaknesses = ", ".join(s.get("weakest_areas") or []) or "n/a"
+
+    queue_size = s.get("queue_size", 0)
+    queue_cap = s.get("queue_capacity", 0)
+    dropped = s.get("dropped_events", 0)
+    queue_label = f"{queue_size}/{queue_cap}" if queue_cap else str(queue_size)
+    queue_color = "#ef4444" if queue_size > (queue_cap * 0.8 if queue_cap else 0) else "#22c55e"
+
+    recent_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(row.get('timestamp', 'n/a')))}</td>"
+        f"<td>{html.escape(str(row.get('test_passed', 0)))}</td>"
+        f"<td>{html.escape(str(row.get('test_failed', 0)))}</td>"
+        "<td>" + html.escape(f'{(row.get("test_pass_rate") or 0.0) * 100:.1f}%') + "</td>"
+        f"<td>{html.escape(str(row.get('total_events', 0)))}</td>"
+        f"<td>{html.escape(str(row.get('dropped_events', 0)))}</td>"
+        "</tr>"
+        for row in (test_mode.get("recent_summaries") or [])
+    )
+
+    return f"""<section>
+  <h2>Test Run Status</h2>
+  <div style="margin-bottom:0.75rem;">
+    <strong>Pass rate:</strong> {html.escape(pass_pct)} ({html.escape(str(s.get('test_passed', 0)))} pass / {html.escape(str(s.get('test_failed', 0)))} fail / {html.escape(str(total))} total)
+    <div style="background:#1e293b;border-radius:4px;height:12px;margin-top:4px;overflow:hidden;">
+      <div style="background:{bar_color};width:{bar_pct}%;height:100%;"></div>
+    </div>
+  </div>
+  <ul>
+    <li><strong>Events processed:</strong> {html.escape(str(s.get('total_events', 0)))}</li>
+    <li><strong>Incidents:</strong> {html.escape(str(s.get('incidents', 0)))}</li>
+    <li><strong>Blocked actions:</strong> {html.escape(str(s.get('blocked_actions', 0)))}</li>
+    <li><strong>Unique attackers:</strong> {html.escape(str(s.get('unique_attackers', 0)))} (repeat: {html.escape(str(s.get('repeat_attackers', 0)))}, new: {html.escape(str(s.get('new_attackers', 0)))})</li>
+    <li><strong>Suppressed:</strong> {html.escape(str(s.get('suppressed', 0)))} (possible FP queue: {html.escape(str(s.get('possible_false_positive_queue', 0)))})</li>
+    <li><strong>Queue:</strong> <span style="color:{queue_color}">{html.escape(queue_label)}</span> &nbsp; Dropped: <span style="color:{'#ef4444' if dropped else '#22c55e'}">{html.escape(str(dropped))}</span></li>
+    <li><strong>Strongest areas:</strong> <span style="color:#22c55e">{html.escape(strengths)}</span></li>
+    <li><strong>Weakest areas:</strong> <span style="color:#f59e0b">{html.escape(weaknesses)}</span></li>
+    <li><strong>Last summary:</strong> {html.escape(str(s.get('timestamp', 'n/a')))}</li>
+  </ul>
+  <h3 style="margin-top:1rem;font-size:0.9rem;">Recent periodic summaries (last 10)</h3>
+  <table>
+    <thead><tr><th>Time</th><th>Pass</th><th>Fail</th><th>Pass %</th><th>Events</th><th>Dropped</th></tr></thead>
+    <tbody>{recent_rows or '<tr><td colspan=6>No summaries yet</td></tr>'}</tbody>
+  </table>
+</section>"""
 
 
 def render_dashboard_html(state: Mapping[str, Any]) -> str:
@@ -212,6 +303,8 @@ def render_dashboard_html(state: Mapping[str, Any]) -> str:
         f"<li>{html.escape(str(entry))}</li>" for entry in state.get("allowlist", [])
     )
 
+    test_mode_panel = _render_test_mode_panel(state.get("test_mode") or {})
+
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -219,7 +312,7 @@ def render_dashboard_html(state: Mapping[str, Any]) -> str:
   <title>Bifrost Dashboard</title>
   <style>
     body {{ font-family: Arial, sans-serif; margin: 1.5rem; background: #0f172a; color: #e2e8f0; }}
-    h1, h2 {{ color: #f8fafc; }}
+    h1, h2, h3 {{ color: #f8fafc; }}
     .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; }}
     section {{ background: #111827; border: 1px solid #334155; border-radius: 8px; padding: 1rem; }}
     table {{ width: 100%; border-collapse: collapse; }}
@@ -246,6 +339,7 @@ def render_dashboard_html(state: Mapping[str, Any]) -> str:
     {_render_key_values("Severity Counts", state.get("severity_counts", {}))}
     <section><h2>Allowlist</h2><ul>{allowlist or '<li>Empty</li>'}</ul></section>
   </div>
+  {test_mode_panel}
   <div class="grid">
     {_render_ranked("Top Threat Classes", state.get("top_threat_classes", []))}
     {_render_ranked("Top MITRE Techniques", state.get("top_mitre_techniques", []))}
@@ -290,15 +384,23 @@ def _build_handler(server: "DashboardServer"):
             if self.path == "/api/state":
                 self._write_json(state)
                 return
+            if self.path == "/api/summary":
+                tm = state.get("test_mode") or {}
+                payload: dict[str, Any] = {
+                    "active": tm.get("active", False),
+                    "latest_summary": tm.get("latest_summary") or {},
+                }
+                self._write_json(payload)
+                return
             if self.path not in {"/", ""}:
                 self.send_error(HTTPStatus.NOT_FOUND, "Not found")
                 return
-            payload = render_dashboard_html(state).encode("utf-8")
+            payload_html = render_dashboard_html(state).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Content-Length", str(len(payload_html)))
             self.end_headers()
-            self.wfile.write(payload)
+            self.wfile.write(payload_html)
 
         def log_message(self, fmt: str, *args: Any) -> None:
             server.log.debug("dashboard %s - %s", self.address_string(), fmt % args)
