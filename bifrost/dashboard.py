@@ -50,7 +50,7 @@ def _load_incident_records(jsonl_path: Path) -> list[dict[str, Any]]:
         incident["_timestamp_dt"] = _parse_timestamp(record.get("timestamp"))
         incidents.append(incident)
     incidents.sort(
-        key=lambda item: item.get("_timestamp_dt") or datetime.min.replace(tzinfo=timezone.utc)
+        key=lambda item: item.get("_timestamp_dt") or datetime.max.replace(tzinfo=timezone.utc)
     )
     return incidents
 
@@ -235,7 +235,7 @@ def render_dashboard_html(state: Mapping[str, Any]) -> str:
   <p>
     <button type="button" onclick="window.location.reload()">Refresh now</button>
     <label style="margin-left:0.75rem;">
-      <input id="auto-refresh" type="checkbox" checked>
+    <input id="auto-refresh" type="checkbox" checked aria-label="Toggle automatic dashboard refresh">
       Auto-refresh every 5s
     </label>
   </p>
