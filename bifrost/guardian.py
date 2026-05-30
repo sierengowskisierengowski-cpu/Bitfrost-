@@ -1277,7 +1277,13 @@ class EventRouter(threading.Thread):
         return decision
 
     def maybe_dispatch_to_executor(self, decision: dict, event_id: int) -> str:
-        """Send policy-approved destructive actions to the Go executor."""
+        """Send policy-approved destructive actions to the Go executor.
+
+        Returns one of:
+          event_not_persisted, database_unhealthy, integrity_check_failed,
+          blocked_by_policy, no_destructive_action, dispatch_success,
+          dispatch_failed.
+        """
         if event_id < 1:
             self.log.error(
                 "Executor dispatch blocked: event not persisted (event_id=%s)",

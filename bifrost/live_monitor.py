@@ -464,6 +464,12 @@ class LiveMonitor:
         status: str,
         details: Mapping[str, Any] | None = None,
     ) -> None:
+        """Persist a structured pipeline-step record into live_monitor.jsonl.
+
+        `step` should be a stable phase name (for example: route_start,
+        compress_event, policy_gate). `status` should be a concise state such
+        as "ok" or "error".
+        """
         if not self.enabled:
             return
         event = dict(event or {})
@@ -697,13 +703,13 @@ class LiveMonitor:
     def build_summary(self, *, now: datetime | None = None) -> dict[str, Any]:
         now = now or datetime.now(timezone.utc)
         strongest_areas = [
-            f"{name}:{count}"
-            for name, count in self._threat_totals.most_common(3)
-            if self._threat_failures.get(name, 0) == 0
+            f"{threat_class}:{count}"
+            for threat_class, count in self._threat_totals.most_common(3)
+            if self._threat_failures.get(threat_class, 0) == 0
         ]
         weakest_areas = [
-            f"{name}:{count}"
-            for name, count in self._failure_reasons.most_common(3)
+            f"{failure_reason}:{count}"
+            for failure_reason, count in self._failure_reasons.most_common(3)
         ]
         total_test = self.test_passed + self.test_failed
         pass_rate = (self.test_passed / total_test) if total_test else 0.0

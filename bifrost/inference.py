@@ -31,6 +31,12 @@ RETRY_DELAY = 1.0
 
 
 class SplitTimeout:
+    """Fallback timeout container when httpx.Timeout is unavailable.
+
+    The OpenAI client primarily needs connect/read semantics. Write timeout
+    follows read timeout, and pool timeout follows connect timeout.
+    """
+
     def __init__(self, *, connect: float, read: float):
         self.connect = float(connect)
         self.read = float(read)
