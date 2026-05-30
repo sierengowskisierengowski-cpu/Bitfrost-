@@ -251,6 +251,8 @@ def test_render_dashboard_html_includes_test_run_panel_when_active(tmp_path):
     assert "80.0%" in html
     assert "port_scan:4" in html
     assert "model_call_failed:1" in html
+    assert "--bg: #0b0314;" in html
+    assert "linear-gradient(90deg, #c4b5fd, #d946ef, #f472b6, #818cf8)" in html
 
 
 def test_render_dashboard_html_shows_inactive_panel_when_no_summaries(tmp_path):

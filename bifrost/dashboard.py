@@ -216,7 +216,7 @@ def _render_test_mode_panel(test_mode: Mapping[str, Any]) -> str:
         return (
             "<div class='card'>"
             "<h2 class='card-title'>Test Run Status</h2>"
-            "<p style='color:#64748b'>No test-mode summary records found. "
+            "<p style='color:#b39acb'>No test-mode summary records found. "
             "Start Guardian with <code>--test-mode</code> to enable live-fire tracking.</p>"
             "</div>"
         )
@@ -248,44 +248,44 @@ def _render_test_mode_panel(test_mode: Mapping[str, Any]) -> str:
         for row in (test_mode.get("recent_summaries") or [])
     )
 
-    return f"""<div class="card" style="border-color:#1e3a5f;margin-bottom:1rem">
-  <h2 class="card-title">Test Run Status <span class="badge" style="background:#052e16;color:#4ade80">LIVE FIRE</span></h2>
+    return f"""<div class="card" style="border-color:#5b2e7e;margin-bottom:1rem">
+  <h2 class="card-title">Test Run Status <span class="badge" style="background:#260c3f;color:#f9a8d4">LIVE FIRE</span></h2>
   <div style="margin-bottom:1rem">
     <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap">
-      <span style="font-size:0.82rem;color:#64748b">Pass rate:</span>
+      <span style="font-size:0.82rem;color:#b39acb">Pass rate:</span>
       <span style="font-size:2rem;font-weight:800;color:{bar_color}">{html.escape(pass_pct)}</span>
-      <span style="font-size:0.82rem;color:#94a3b8">{html.escape(str(s.get('test_passed', 0)))} pass &nbsp;/&nbsp; {html.escape(str(s.get('test_failed', 0)))} fail &nbsp;/&nbsp; {html.escape(str(total))} total</span>
+      <span style="font-size:0.82rem;color:#d7b4ff">{html.escape(str(s.get('test_passed', 0)))} pass &nbsp;/&nbsp; {html.escape(str(s.get('test_failed', 0)))} fail &nbsp;/&nbsp; {html.escape(str(total))} total</span>
     </div>
-    <div style="background:#0a1628;border-radius:6px;height:10px;margin-top:0.5rem;overflow:hidden;border:1px solid #1e3a5f">
+    <div style="background:#1a0f2c;border-radius:6px;height:10px;margin-top:0.5rem;overflow:hidden;border:1px solid #5b2e7e">
       <div style="background:{bar_color};width:{bar_pct}%;height:100%;border-radius:6px;transition:width .5s"></div>
     </div>
   </div>
   <div class="grid-3" style="margin-bottom:0.75rem">
-    <div style="background:#0a1628;border-radius:8px;padding:0.6rem 0.9rem;border:1px solid #1e3a5f">
-      <div style="font-size:0.65rem;color:#64748b;text-transform:uppercase;letter-spacing:.08em">Events</div>
-      <div style="font-size:1.4rem;font-weight:700;color:#60a5fa">{html.escape(str(s.get('total_events', 0)))}</div>
+    <div style="background:#1a0f2c;border-radius:8px;padding:0.6rem 0.9rem;border:1px solid #5b2e7e">
+      <div style="font-size:0.65rem;color:#b39acb;text-transform:uppercase;letter-spacing:.08em">Events</div>
+      <div style="font-size:1.4rem;font-weight:700;color:#c4b5fd">{html.escape(str(s.get('total_events', 0)))}</div>
     </div>
-    <div style="background:#0a1628;border-radius:8px;padding:0.6rem 0.9rem;border:1px solid #1e3a5f">
-      <div style="font-size:0.65rem;color:#64748b;text-transform:uppercase;letter-spacing:.08em">Incidents</div>
-      <div style="font-size:1.4rem;font-weight:700;color:#a78bfa">{html.escape(str(s.get('incidents', 0)))}</div>
+    <div style="background:#1a0f2c;border-radius:8px;padding:0.6rem 0.9rem;border:1px solid #5b2e7e">
+      <div style="font-size:0.65rem;color:#b39acb;text-transform:uppercase;letter-spacing:.08em">Incidents</div>
+      <div style="font-size:1.4rem;font-weight:700;color:#d946ef">{html.escape(str(s.get('incidents', 0)))}</div>
     </div>
-    <div style="background:#0a1628;border-radius:8px;padding:0.6rem 0.9rem;border:1px solid #1e3a5f">
-      <div style="font-size:0.65rem;color:#64748b;text-transform:uppercase;letter-spacing:.08em">Blocked</div>
-      <div style="font-size:1.4rem;font-weight:700;color:#f43f5e">{html.escape(str(s.get('blocked_actions', 0)))}</div>
+    <div style="background:#1a0f2c;border-radius:8px;padding:0.6rem 0.9rem;border:1px solid #5b2e7e">
+      <div style="font-size:0.65rem;color:#b39acb;text-transform:uppercase;letter-spacing:.08em">Blocked</div>
+      <div style="font-size:1.4rem;font-weight:700;color:#f472b6">{html.escape(str(s.get('blocked_actions', 0)))}</div>
     </div>
   </div>
   <ul style="font-size:0.82rem;list-style:none;padding:0;display:flex;flex-direction:column;gap:0.3rem">
-    <li><span style="color:#64748b">Unique attackers:</span> {html.escape(str(s.get('unique_attackers', 0)))} &nbsp;<span style="color:#64748b">(repeat: {html.escape(str(s.get('repeat_attackers', 0)))}, new: {html.escape(str(s.get('new_attackers', 0)))})</span></li>
-    <li><span style="color:#64748b">Suppressed:</span> {html.escape(str(s.get('suppressed', 0)))} &nbsp;<span style="color:#64748b">(FP queue: {html.escape(str(s.get('possible_false_positive_queue', 0)))})</span></li>
-    <li><span style="color:#64748b">Queue:</span> <span style="color:{queue_color};font-weight:600">{html.escape(queue_label)}</span> &nbsp; <span style="color:#64748b">Dropped:</span> <span style="color:{'#ef4444' if dropped else '#22c55e'};font-weight:600">{html.escape(str(dropped))}</span></li>
-    <li><span style="color:#64748b">Strongest:</span> <span style="color:#22c55e">{html.escape(strengths)}</span></li>
-    <li><span style="color:#64748b">Weakest:</span> <span style="color:#f59e0b">{html.escape(weaknesses)}</span></li>
-    <li><span style="color:#64748b">Last summary:</span> {html.escape(str(s.get('timestamp', 'n/a')))}</li>
+    <li><span style="color:#b39acb">Unique attackers:</span> {html.escape(str(s.get('unique_attackers', 0)))} &nbsp;<span style="color:#b39acb">(repeat: {html.escape(str(s.get('repeat_attackers', 0)))}, new: {html.escape(str(s.get('new_attackers', 0)))})</span></li>
+    <li><span style="color:#b39acb">Suppressed:</span> {html.escape(str(s.get('suppressed', 0)))} &nbsp;<span style="color:#b39acb">(FP queue: {html.escape(str(s.get('possible_false_positive_queue', 0)))})</span></li>
+    <li><span style="color:#b39acb">Queue:</span> <span style="color:{queue_color};font-weight:600">{html.escape(queue_label)}</span> &nbsp; <span style="color:#b39acb">Dropped:</span> <span style="color:{'#ef4444' if dropped else '#22c55e'};font-weight:600">{html.escape(str(dropped))}</span></li>
+    <li><span style="color:#b39acb">Strongest:</span> <span style="color:#a7f3d0">{html.escape(strengths)}</span></li>
+    <li><span style="color:#b39acb">Weakest:</span> <span style="color:#fcd34d">{html.escape(weaknesses)}</span></li>
+    <li><span style="color:#b39acb">Last summary:</span> {html.escape(str(s.get('timestamp', 'n/a')))}</li>
   </ul>
-  <h3 style="margin-top:1rem;font-size:0.75rem;color:#64748b;text-transform:uppercase;letter-spacing:.1em">Recent periodic summaries (last 10)</h3>
+  <h3 style="margin-top:1rem;font-size:0.75rem;color:#b39acb;text-transform:uppercase;letter-spacing:.1em">Recent periodic summaries (last 10)</h3>
   <table style="margin-top:0.5rem">
     <thead><tr><th>Time</th><th>Pass</th><th>Fail</th><th>Pass %</th><th>Events</th><th>Dropped</th></tr></thead>
-    <tbody>{recent_rows or '<tr><td colspan=6 style="color:#64748b">No summaries yet</td></tr>'}</tbody>
+    <tbody>{recent_rows or '<tr><td colspan=6 style="color:#b39acb">No summaries yet</td></tr>'}</tbody>
   </table>
 </div>"""
 
@@ -294,13 +294,13 @@ def _severity_badge(severity: str) -> str:
     """Return an HTML badge span for a severity string."""
     sev = str(severity).upper()
     colors = {
-        "CRITICAL": ("#ff2d55", "#fff"),
-        "HIGH": ("#ff6b35", "#fff"),
-        "MEDIUM": ("#f59e0b", "#000"),
-        "LOW": ("#22c55e", "#000"),
-        "INFO": ("#60a5fa", "#000"),
+        "CRITICAL": ("#ec4899", "#fff"),
+        "HIGH": ("#d946ef", "#fff"),
+        "MEDIUM": ("#c084fc", "#13091f"),
+        "LOW": ("#60a5fa", "#081121"),
+        "INFO": ("#c4b5fd", "#13091f"),
     }
-    bg, fg = colors.get(sev, ("#475569", "#fff"))
+    bg, fg = colors.get(sev, ("#5b2e7e", "#fff"))
     return (
         f'<span style="background:{bg};color:{fg};padding:2px 8px;'
         f'border-radius:999px;font-size:0.72rem;font-weight:700;'
@@ -317,11 +317,11 @@ def render_dashboard_html(state: Mapping[str, Any]) -> str:
 
     # — stat cards row —
     stat_cards = [
-        ("Total Events", str(summary.get("db_events", 0)), "#60a5fa", "⬡"),
-        ("Incidents", str(summary.get("dashboard_incidents", 0)), "#a78bfa", "⚡"),
-        ("Blocked", str(summary.get("blocked_actions", 0)), "#f43f5e", "🛡"),
-        ("Unique Attackers", str(summary.get("unique_attackers", 0)), "#fb923c", "👤"),
-        ("Last Hour", str(summary.get("last_hour_incidents", 0)), "#34d399", "⏱"),
+        ("Total Events", str(summary.get("db_events", 0)), "#c4b5fd", "⬡"),
+        ("Incidents", str(summary.get("dashboard_incidents", 0)), "#d946ef", "⚡"),
+        ("Blocked", str(summary.get("blocked_actions", 0)), "#f472b6", "🛡"),
+        ("Unique Attackers", str(summary.get("unique_attackers", 0)), "#818cf8", "👤"),
+        ("Last Hour", str(summary.get("last_hour_incidents", 0)), "#67e8f9", "⏱"),
     ]
     stat_html = "".join(
         f"""<div class="stat-card">
@@ -343,21 +343,21 @@ def render_dashboard_html(state: Mapping[str, Any]) -> str:
                 f"<td style='text-align:right;font-weight:600'>{html.escape(str(cnt))}</td></tr>"
             )
     if not sev_rows:
-        sev_rows = "<tr><td colspan=2 style='color:#64748b'>No incidents yet</td></tr>"
+        sev_rows = "<tr><td colspan=2 style='color:#b39acb'>No incidents yet</td></tr>"
 
     # — threat classes —
     threat_rows = "".join(
         f"<tr><td>{html.escape(str(row.get('name','?')))}</td>"
         f"<td style='text-align:right'>{html.escape(str(row.get('count',0)))}</td></tr>"
         for row in state.get("top_threat_classes", [])
-    ) or "<tr><td colspan=2 style='color:#64748b'>None</td></tr>"
+    ) or "<tr><td colspan=2 style='color:#b39acb'>None</td></tr>"
 
     # — MITRE techniques —
     mitre_rows = "".join(
         f"<tr><td><code style='font-size:0.78rem'>{html.escape(str(row.get('name','?')))}</code></td>"
         f"<td style='text-align:right'>{html.escape(str(row.get('count',0)))}</td></tr>"
         for row in state.get("top_mitre_techniques", [])
-    ) or "<tr><td colspan=2 style='color:#64748b'>None</td></tr>"
+    ) or "<tr><td colspan=2 style='color:#b39acb'>None</td></tr>"
 
     # — incident rows —
     incident_rows = []
@@ -375,14 +375,14 @@ def render_dashboard_html(state: Mapping[str, Any]) -> str:
             f"<td>{_severity_badge(sev)}</td>"
             f"<td style='font-size:0.82rem'>{html.escape(str(incident.get('threat_class','?')))}</td>"
             f"<td style='font-size:0.82rem'>{html.escape(str(incident.get('attacker_identity','?')))}</td>"
-            f"<td style='font-size:0.75rem;color:#93c5fd'>{html.escape(mitre_summary)}</td>"
+            f"<td style='font-size:0.75rem;color:#d7b4ff'>{html.escape(mitre_summary)}</td>"
             f"<td style='font-size:0.8rem;font-weight:600'>{html.escape(str(incident.get('action_taken','NONE')))}</td>"
-            f"<td style='font-size:0.78rem;color:#cbd5e1'>{html.escape(str(incident.get('summary','')))}</td>"
+            f"<td style='font-size:0.78rem;color:#f4eaff'>{html.escape(str(incident.get('summary','')))}</td>"
             "</tr>"
         )
 
     incidents_body = "".join(incident_rows) or (
-        "<tr><td colspan=7 style='color:#64748b;text-align:center;padding:1.5rem'>"
+        "<tr><td colspan=7 style='color:#b39acb;text-align:center;padding:1.5rem'>"
         "No incidents recorded yet</td></tr>"
     )
 
@@ -404,13 +404,13 @@ def render_dashboard_html(state: Mapping[str, Any]) -> str:
     else:
         timeline_section = """<section class="card">
   <h2 class="card-title">Activity Timeline</h2>
-  <p style="color:#64748b;margin:0">No recent activity</p>
+  <p style="color:#b39acb;margin:0">No recent activity</p>
 </section>"""
 
     # — allowlist —
     allowlist_items = "".join(
         f"<li>{html.escape(str(e))}</li>" for e in state.get("allowlist", [])
-    ) or "<li style='color:#64748b'>Empty</li>"
+    ) or "<li style='color:#b39acb'>Empty</li>"
 
     # — test mode panel —
     test_panel = _render_test_mode_panel(test_mode)
@@ -428,19 +428,19 @@ def render_dashboard_html(state: Mapping[str, Any]) -> str:
   <style>
     *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
     :root {{
-      --bg: #060b14;
-      --surface: #0d1626;
-      --surface2: #111e33;
-      --border: #1e3a5f;
-      --text: #cdd9ef;
-      --text-dim: #5a7299;
-      --accent: #3b82f6;
-      --accent2: #8b5cf6;
-      --red: #f43f5e;
-      --orange: #fb923c;
-      --yellow: #f59e0b;
-      --green: #22c55e;
-      --teal: #2dd4bf;
+      --bg: #0b0314;
+      --surface: #160824;
+      --surface2: #221038;
+      --border: #5b2e7e;
+      --text: #f4eaff;
+      --text-dim: #b39acb;
+      --accent: #a855f7;
+      --accent2: #d946ef;
+      --red: #f472b6;
+      --orange: #f9a8d4;
+      --yellow: #fbcfe8;
+      --green: #67e8f9;
+      --teal: #818cf8;
     }}
     html {{ font-size: 15px; }}
     body {{
@@ -454,7 +454,7 @@ def render_dashboard_html(state: Mapping[str, Any]) -> str:
 
     /* ── Header ── */
     .header {{
-      background: linear-gradient(135deg, #0a1628 0%, #0d1e3a 50%, #071526 100%);
+      background: linear-gradient(135deg, #210a33 0%, #341058 50%, #1a0930 100%);
       border-bottom: 1px solid var(--border);
       padding: 0 1.75rem;
       display: flex;
@@ -466,7 +466,7 @@ def render_dashboard_html(state: Mapping[str, Any]) -> str:
       font-size: 1.25rem;
       font-weight: 800;
       letter-spacing: -0.02em;
-      background: linear-gradient(90deg, #60a5fa, #a78bfa, #60a5fa);
+      background: linear-gradient(90deg, #c4b5fd, #d946ef, #f472b6, #818cf8);
       background-size: 200%;
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
@@ -549,15 +549,15 @@ def render_dashboard_html(state: Mapping[str, Any]) -> str:
       font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.1em;
-      color: #93c5fd;
+      color: #d7b4ff;
       margin-bottom: 0.85rem;
       display: flex;
       align-items: center;
       gap: 0.5rem;
     }}
     .badge {{
-      background: #1e3a5f;
-      color: #60a5fa;
+      background: #33144f;
+      color: #f9a8d4;
       font-size: 0.65rem;
       padding: 2px 7px;
       border-radius: 999px;
@@ -584,7 +584,7 @@ def render_dashboard_html(state: Mapping[str, Any]) -> str:
       vertical-align: top;
     }}
     tr:last-child td {{ border-bottom: none; }}
-    tr:hover td {{ background: rgba(59,130,246,0.04); }}
+    tr:hover td {{ background: rgba(217,70,239,0.08); }}
 
     /* ── Timeline chart ── */
     .tl-chart {{
@@ -604,7 +604,7 @@ def render_dashboard_html(state: Mapping[str, Any]) -> str:
     }}
     .tl-bar {{
       width: 14px;
-      background: linear-gradient(180deg, #60a5fa, #1d4ed8);
+      background: linear-gradient(180deg, #d946ef, #818cf8);
       border-radius: 3px 3px 0 0;
       transition: height .3s;
     }}
@@ -612,11 +612,11 @@ def render_dashboard_html(state: Mapping[str, Any]) -> str:
 
     /* ── Paths row ── */
     .paths-row {{ font-size: 0.72rem; color: var(--text-dim); margin-bottom: 1.25rem; }}
-    .paths-row code {{ color: #7dd3fc; background: #0a1628; padding: 1px 5px; border-radius: 4px; }}
+    .paths-row code {{ color: #f9a8d4; background: #210a33; padding: 1px 5px; border-radius: 4px; }}
 
     ul {{ padding-left: 1.2rem; }}
     li {{ font-size: 0.82rem; padding: 0.2rem 0; }}
-    code {{ color: #7dd3fc; font-size: 0.82rem; }}
+    code {{ color: #f9a8d4; font-size: 0.82rem; }}
 
     /* ── Incidents table ── */
     .incidents-wrap {{ overflow-x: auto; }}
