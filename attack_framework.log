@@ -20,3 +20,21 @@
 2026-05-29 16:24:55,495 [INFO] [c2][dns_tunnel] ok | root/admin + DNS pivot
 2026-05-29 16:25:34,799 [INFO] [execution][memfd_fileless] ok | memfd_create probe
 2026-05-29 16:25:51,677 [INFO] [lateral][network_recon] ok | full network recon
+2026-05-30 08:05:47,282 [INFO] Starting: target=127.0.0.1 duration=48.0h types=58
+2026-05-30 08:05:51,366 [INFO] [execution][exec_from_tmp] ok | /tmp/.hbash
+2026-05-30 08:10:09,223 [INFO] [advanced][ptrace_probe] ok | ptrace status check
+2026-05-30 08:10:16,918 [INFO] [credential][ssh_common_password] ok | user:deploy
+2026-05-30 08:10:24,987 [INFO] [credential][ssh_common_password] ok | user:master
+2026-05-30 08:10:27,817 [INFO] [evasion][timestamp_manip] ok | touch -t timestamp
+2026-05-30 08:18:40,789 [INFO] [exhaustion][ingest_flood_500] ok | ok=0 fail=500
+2026-05-30 08:19:26,363 [INFO] [lateral][internal_ping_sweep] ok | 192.168.0.0/24
+2026-05-30 08:19:34,050 [INFO] [persistence][systemd_user] ok | systemd user dir
+2026-05-30 08:20:55,196 [INFO] [lateral][ssh_agent_enum] ok | SSH agent enumeration
+2026-05-30 08:22:31,940 [INFO] Starting: target=127.0.0.1 duration=48.0h types=58
+2026-05-30 08:22:34,026 [INFO] [exfil][tcp_exfil] ok | netcat exfil attempt
+2026-05-30 08:23:09,051 [INFO] [privesc][shadow_read] ok | /etc/shadow read attempt
+2026-05-30 08:23:52,056 [INFO] [credential][credential_stuffing] ok | pi:raspberry
+2026-05-30 08:27:27,169 [INFO] [execution][exec_from_tmp] ok | /tmp/.hbash
+2026-05-30 08:28:21,314 [INFO] [privesc][suid_binary] ok | chmod +s /tmp/rbash
+2026-05-30 08:29:04,447 [INFO] [protocol][syn_scan_500] ok | nmap SYN top500
+2026-05-30 08:30:19,470 [INFO] Stopped.
