@@ -267,6 +267,25 @@ def get_platform_paths(system):
         }
 
 
+def install_bifrost_cli() -> None:
+    """Install a `bifrost` launcher script into ~/.local/bin."""
+    project_root = Path(__file__).resolve().parent
+    bin_dir = Path.home() / ".local" / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    launcher = bin_dir / "bifrost"
+    content = f"""#!/usr/bin/env python3
+import sys
+sys.path.insert(0, "{project_root}")
+from bifrost.__main__ import main
+if __name__ == "__main__":
+    raise SystemExit(main())
+"""
+    launcher.write_text(content, encoding="utf-8")
+    launcher.chmod(0o755)
+    print(f"[+] CLI installed: {launcher}")
+    print("    Usage: bifrost   (or: python -m bifrost)")
+
+
 def generate_config(tier, analyst_model, extractor_model, ollama_ok, paths):
     print("[*] Generating configuration...")
 
@@ -395,6 +414,7 @@ def generate_config(tier, analyst_model, extractor_model, ollama_ok, paths):
     print(f"[+] Service tokens written to {tokens_path} (mode 600).")
     print("[+] Source this file before starting services:")
     print(f"    source {tokens_path}")
+    install_bifrost_cli()
     print(f"[+] Integrity hash: {checksum[:16]}...")
 
 

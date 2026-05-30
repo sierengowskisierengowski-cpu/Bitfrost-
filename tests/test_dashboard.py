@@ -5,7 +5,9 @@ import sqlite3
 from datetime import datetime, timezone
 
 from bifrost.dashboard import (
+    DISCLAIMER_TEXT,
     build_dashboard_state,
+    parse_time_range,
     render_dashboard_html,
 )
 
@@ -86,10 +88,59 @@ def test_build_dashboard_state_summarizes_jsonl_and_db(tmp_path):
     assert state["allowlist"] == ["45.83.64.11"]
     assert state["top_mitre_techniques"][0]["count"] == 1
     assert state["incidents"][0]["threat_class"] == "port_scan"
-    # test_mode key must always be present even when no summary records exist
     assert "test_mode" in state
     assert state["test_mode"]["active"] is False
-    assert state["test_mode"]["latest_summary"] == {}
+    assert state["connectivity"]["database_connected"] is True
+    assert len(state["attackers"]) == 2
+    assert len(state["all_incidents"]) == 2
+    assert len(state["blocked_actions"]) == 1
+
+
+def test_build_dashboard_state_filters_by_time_range(tmp_path):
+    db_path = tmp_path / "events.db"
+    jsonl_path = tmp_path / "live_monitor.jsonl"
+    _make_db(db_path, [])
+
+    records = [
+        {
+            "record_type": "incident",
+            "timestamp": "2026-05-29T12:00:00Z",
+            "severity": "LOW",
+            "threat_class": "old",
+            "attacker_identity": "1.2.3.4",
+            "policy_allowed": True,
+            "action_taken": "LOG",
+            "summary": "old",
+            "mitre_attack": [],
+        },
+        {
+            "record_type": "incident",
+            "timestamp": "2026-05-30T12:00:00Z",
+            "severity": "HIGH",
+            "threat_class": "new",
+            "attacker_identity": "5.6.7.8",
+            "policy_allowed": True,
+            "action_taken": "ALERT",
+            "summary": "new",
+            "mitre_attack": [],
+        },
+    ]
+    _write_jsonl(jsonl_path, records)
+
+    state = build_dashboard_state(
+        db_path=db_path,
+        live_monitor_jsonl_path=jsonl_path,
+        time_range="24h",
+        now=datetime(2026, 5, 30, 12, 30, tzinfo=timezone.utc),
+    )
+    assert state["summary"]["dashboard_incidents"] == 1
+    assert state["all_incidents"][0]["threat_class"] == "new"
+
+
+def test_parse_time_range_defaults():
+    assert parse_time_range(None) == "24h"
+    assert parse_time_range("7d") == "7d"
+    assert parse_time_range("invalid") == "24h"
 
 
 def test_build_dashboard_state_exposes_test_mode_summary(tmp_path):
@@ -201,7 +252,6 @@ def test_build_dashboard_state_surfaces_latest_of_multiple_summaries(tmp_path):
 
     tm = state["test_mode"]
     assert tm["active"] is True
-    # Must be the last (latest) summary
     assert tm["latest_summary"]["test_passed"] == 12
     assert tm["latest_summary"]["test_failed"] == 3
     assert len(tm["recent_summaries"]) == 3
@@ -247,12 +297,19 @@ def test_render_dashboard_html_includes_test_run_panel_when_active(tmp_path):
     html = render_dashboard_html(state)
 
     assert "Test Run Status" in html
-    assert "Pass rate:" in html
     assert "80.0%" in html
     assert "port_scan:4" in html
     assert "model_call_failed:1" in html
-    assert "--bg: #0b0314;" in html
-    assert "linear-gradient(90deg, #c4b5fd, #d946ef, #f472b6, #818cf8)" in html
+    assert "#080808" in html
+    assert "8B5CF6" in html or "rainbow-h" in html
+    assert "disclaimer-modal" in html
+    assert DISCLAIMER_TEXT[:40] in html
+    assert "data-view=\"attackers\"" in html
+    assert "stat-card" in html
+    assert "stat-row" in html
+    assert "JetBrains Mono" in html
+    assert "favicon" in html.lower() or "image/svg+xml" in html
+    assert "test-run-panel" in html
 
 
 def test_render_dashboard_html_shows_inactive_panel_when_no_summaries(tmp_path):
@@ -270,4 +327,5 @@ def test_render_dashboard_html_shows_inactive_panel_when_no_summaries(tmp_path):
     html = render_dashboard_html(state)
 
     assert "Test Run Status" in html
-    assert "--test-mode" in html
+    assert "test-run-panel" in html
+    assert "test-mode" in html

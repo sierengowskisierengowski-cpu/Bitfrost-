@@ -1,21 +1,92 @@
 #!/usr/bin/env python3
-"""Minimal read-only dashboard for live Bifrost incidents."""
+"""Enterprise read-only security dashboard for live Bifrost incidents."""
 
 from __future__ import annotations
 
 import html
 import json
 import logging
+import os
+import secrets
 import sqlite3
 import threading
-from collections import Counter
+import time
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import parse_qs, urlparse
 
 from bifrost import paths as bifrost_paths
+
+# ── Design tokens (Bifrost rainbow bridge) ──────────────────────────────────
+RAINBOW_GRADIENT = (
+    "linear-gradient(90deg, #8B5CF6, #4F46E5, #3B82F6, #06B6D4, "
+    "#22C55E, #EAB308, #D946EF)"
+)
+SEVERITY_COLORS = {
+    "CRITICAL": "#FF2D2D",
+    "HIGH": "#FF6B35",
+    "MEDIUM": "#FFD166",
+    "LOW": "#4ECDC4",
+    "INFO": "#6B7280",
+    "UNKNOWN": "#6B7280",
+}
+
+TIME_RANGE_SECONDS: dict[str, int | None] = {
+    "1h": 3600,
+    "24h": 86400,
+    "7d": 7 * 86400,
+    "30d": 30 * 86400,
+    "all": None,
+}
+DEFAULT_TIME_RANGE = "24h"
+INCIDENT_PAGE_SIZE = 25
+MIN_INCIDENT_ROWS = 100
+
+DISCLAIMER_TEXT = """
+BIFROST SECURITY PLATFORM — AUTHORIZED USE AGREEMENT
+
+This software performs autonomous security monitoring and may execute defensive
+actions on the host system when explicitly enabled. By accepting this agreement
+you confirm that:
+
+1. AUTHORIZATION: You are authorized to monitor and defend the systems on which
+   Bifrost is installed. Unauthorized deployment on networks or systems you do
+   not own or have written permission to test is prohibited.
+
+2. RESEARCH & LAB USE: Bifrost is intended for security research, honeypot
+   environments, controlled lab networks, and systems you administer. Production
+   deployment requires explicit risk assessment and change control.
+
+3. AUTONOMOUS ACTIONS: Enabling autonomous mode may block IP addresses, terminate
+   processes, and quarantine files. Misconfiguration can disrupt legitimate services.
+   Default installation uses learning mode and dry-run; you must deliberately disable
+   safeguards to enable enforcement.
+
+4. DATA HANDLING: Telemetry, credentials observed in honeypots, and security events
+   are stored locally. You are responsible for protecting stored data and complying
+   with applicable privacy and computer-fraud laws in your jurisdiction.
+
+5. NO WARRANTY: This software is provided as-is without warranty of any kind. The
+   authors are not liable for damages arising from use or misuse.
+
+6. INDEMNIFICATION: You agree to hold harmless the project contributors from claims
+   arising from your deployment decisions.
+
+Scroll to the bottom of this document to enable the Accept button.
+""".strip()
+
+_DISCLAIMER_SESSIONS: set[str] = set()
+_DISCLAIMER_COOKIE = "bifrost_disclaimer"
+
+
+def parse_time_range(value: str | None) -> str:
+    key = (value or DEFAULT_TIME_RANGE).strip().lower()
+    return key if key in TIME_RANGE_SECONDS else DEFAULT_TIME_RANGE
 
 
 def _parse_timestamp(value: Any) -> datetime | None:
@@ -34,7 +105,6 @@ def _parse_timestamp(value: Any) -> datetime | None:
 
 
 def _load_jsonl_records(jsonl_path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Return (incidents, summaries) loaded from the live_monitor JSONL file."""
     if not jsonl_path.exists():
         return [], []
     incidents: list[dict[str, Any]] = []
@@ -56,33 +126,222 @@ def _load_jsonl_records(jsonl_path: Path) -> tuple[list[dict[str, Any]], list[di
             summary["_timestamp_dt"] = _parse_timestamp(record.get("timestamp"))
             summaries.append(summary)
     incidents.sort(
-        key=lambda item: item.get("_timestamp_dt") or datetime.max.replace(tzinfo=timezone.utc)
+        key=lambda item: item.get("_timestamp_dt") or datetime.min.replace(tzinfo=timezone.utc)
     )
     summaries.sort(
-        key=lambda item: item.get("_timestamp_dt") or datetime.max.replace(tzinfo=timezone.utc)
+        key=lambda item: item.get("_timestamp_dt") or datetime.min.replace(tzinfo=timezone.utc)
     )
     return incidents, summaries
 
 
-def _load_incident_records(jsonl_path: Path) -> list[dict[str, Any]]:
-    incidents, _ = _load_jsonl_records(jsonl_path)
-    return incidents
+def _filter_by_time_range(
+    incidents: list[dict[str, Any]],
+    *,
+    now: datetime,
+    range_key: str,
+) -> list[dict[str, Any]]:
+    seconds = TIME_RANGE_SECONDS.get(range_key)
+    if seconds is None:
+        return list(incidents)
+    cutoff = now - timedelta(seconds=seconds)
+    return [
+        inc
+        for inc in incidents
+        if inc.get("_timestamp_dt") and inc["_timestamp_dt"] >= cutoff
+    ]
+
+
+def _strip_internal(incident: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in incident.items() if not k.startswith("_")}
+
+
+def _geo_hint(ip: str) -> dict[str, str]:
+    ip = str(ip or "").strip()
+    if not ip or ip == "unknown":
+        return {"flag": "❓", "label": "Unknown", "code": "??"}
+    if ip.startswith(("10.", "192.168.", "172.")):
+        return {"flag": "🏠", "label": "Private (RFC1918)", "code": "RFC1918"}
+    if ip.startswith("127."):
+        return {"flag": "🔁", "label": "Loopback", "code": "LOOP"}
+    if ":" in ip and (ip.startswith("fe80") or ip == "::1"):
+        return {"flag": "🏠", "label": "Private (IPv6)", "code": "RFC4193"}
+    return {"flag": "🌐", "label": "External", "code": "EXT"}
+
+
+def _threat_level_from_incidents(incidents: list[dict[str, Any]]) -> str:
+    order = {"CRITICAL": 5, "HIGH": 4, "MEDIUM": 3, "LOW": 2, "INFO": 1, "UNKNOWN": 0}
+    best = "INFO"
+    best_score = 0
+    for inc in incidents:
+        sev = str(inc.get("severity") or "UNKNOWN").upper()
+        score = order.get(sev, 0)
+        if score > best_score:
+            best_score = score
+            best = sev
+    return best
+
+
+def _build_attacker_profiles(incidents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for inc in incidents:
+        ip = str(inc.get("attacker_identity") or "unknown")
+        grouped[ip].append(inc)
+
+    profiles: list[dict[str, Any]] = []
+    for ip, items in grouped.items():
+        timestamps = [i.get("_timestamp_dt") for i in items if i.get("_timestamp_dt")]
+        event_types = sorted(
+            {
+                str(i.get("threat_class") or "unknown")
+                for i in items
+            }
+        )
+        geo = _geo_hint(ip)
+        profiles.append(
+            {
+                "ip": ip,
+                "country_flag": geo["flag"],
+                "country_label": geo["label"],
+                "country_code": geo["code"],
+                "first_seen": min(timestamps).isoformat().replace("+00:00", "Z")
+                if timestamps
+                else None,
+                "last_seen": max(timestamps).isoformat().replace("+00:00", "Z")
+                if timestamps
+                else None,
+                "total_hits": len(items),
+                "threat_level": _threat_level_from_incidents(items),
+                "event_types": event_types,
+                "events": [
+                    {
+                        "timestamp": _strip_internal(i).get("timestamp"),
+                        "severity": i.get("severity"),
+                        "threat_class": i.get("threat_class"),
+                        "action_taken": i.get("action_taken"),
+                        "summary": i.get("summary"),
+                    }
+                    for i in sorted(
+                        items,
+                        key=lambda x: x.get("_timestamp_dt")
+                        or datetime.min.replace(tzinfo=timezone.utc),
+                        reverse=True,
+                    )
+                ],
+            }
+        )
+    profiles.sort(key=lambda p: p["total_hits"], reverse=True)
+    return profiles
+
+
+def _build_blocked_actions(incidents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    blocked = []
+    for inc in incidents:
+        if inc.get("policy_allowed") is False or str(inc.get("action_taken", "")).upper() == "BLOCK":
+            blocked.append(_strip_internal(inc))
+    blocked.sort(key=lambda x: x.get("timestamp") or "", reverse=True)
+    return blocked
+
+
+def _build_minute_breakdown(
+    incidents: list[dict[str, Any]],
+    *,
+    now: datetime,
+) -> list[dict[str, Any]]:
+    cutoff = now - timedelta(hours=1)
+    buckets: Counter[str] = Counter()
+    for incident in incidents:
+        ts = incident.get("_timestamp_dt")
+        if not ts or ts < cutoff:
+            continue
+        minute = ts.replace(second=0, microsecond=0).isoformat().replace("+00:00", "Z")
+        buckets[minute] += 1
+    return [
+        {"minute": minute, "count": count}
+        for minute, count in sorted(buckets.items())
+    ]
 
 
 def _load_db_summary(db_path: Path) -> dict[str, Any]:
     if not db_path.exists():
-        return {"total_events": 0, "latest_event_timestamp": None}
+        return {
+            "total_events": 0,
+            "latest_event_timestamp": None,
+            "connected": False,
+        }
     try:
         with sqlite3.connect(db_path) as conn:
             total_events, latest_timestamp = conn.execute(
                 "SELECT COUNT(*), MAX(timestamp) FROM events"
             ).fetchone()
     except sqlite3.Error:
-        return {"total_events": 0, "latest_event_timestamp": None}
+        return {
+            "total_events": 0,
+            "latest_event_timestamp": None,
+            "connected": False,
+        }
     return {
         "total_events": int(total_events or 0),
         "latest_event_timestamp": latest_timestamp,
+        "connected": True,
     }
+
+
+def _load_db_events(db_path: Path, *, limit: int = 500) -> list[dict[str, Any]]:
+    if not db_path.exists():
+        return []
+    try:
+        with sqlite3.connect(db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT id, timestamp, source, boundary, action_taken, threat_class
+                FROM events
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+    except sqlite3.Error:
+        try:
+            with sqlite3.connect(db_path) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT id, timestamp, source, boundary, action_taken
+                    FROM events
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+        except sqlite3.Error:
+            return []
+    events = []
+    for row in rows:
+        if len(row) >= 6:
+            eid, ts, source, boundary, action, threat = row
+        else:
+            eid, ts, source, boundary, action = row
+            threat = None
+        events.append(
+            {
+                "id": eid,
+                "timestamp": ts,
+                "source": source,
+                "boundary": boundary,
+                "action_taken": action,
+                "threat_class": threat,
+            }
+        )
+    return events
+
+
+def _live_monitor_active(jsonl_path: Path, *, now: datetime) -> bool:
+    if not jsonl_path.exists():
+        return False
+    try:
+        mtime = datetime.fromtimestamp(jsonl_path.stat().st_mtime, tz=timezone.utc)
+    except OSError:
+        return False
+    return (now - mtime) <= timedelta(hours=24)
 
 
 def _summarize_timeline(
@@ -105,6 +364,37 @@ def _summarize_timeline(
     ]
 
 
+def build_settings_snapshot(
+    config: Mapping[str, Any],
+    *,
+    db_path: Path,
+    log_path: Path,
+    started_at: float | None = None,
+) -> dict[str, Any]:
+    uptime_seconds = time.time() - started_at if started_at else 0
+    return {
+        "hardware_tier": config.get("hardware_tier", "unknown"),
+        "analyst_model": config.get("analyst_model") or config.get("groq_model") or "n/a",
+        "extractor_model": config.get("extractor_model") or "n/a",
+        "learning_mode": bool(config.get("learning_mode", True)),
+        "dry_run": bool(config.get("dry_run", True)),
+        "autonomous_actions_enabled": bool(
+            config.get("autonomous_actions_enabled", False)
+        ),
+        "confidence_threshold": config.get("confidence_threshold", 0.85),
+        "tokens": {
+            "ingest": bool(os.getenv("BIFROST_INGEST_TOKEN", "").strip()),
+            "executor": bool(os.getenv("BIFROST_EXECUTOR_TOKEN", "").strip()),
+            "dashboard": bool(os.getenv("BIFROST_DASHBOARD_TOKEN", "").strip()),
+        },
+        "db_path": str(db_path),
+        "log_path": str(log_path),
+        "uptime_seconds": int(uptime_seconds),
+        "dashboard_host": config.get("dashboard_host", "127.0.0.1"),
+        "dashboard_port": config.get("dashboard_port", 8766),
+    }
+
+
 def build_dashboard_state(
     *,
     db_path: str | Path,
@@ -112,43 +402,57 @@ def build_dashboard_state(
     monitor_safelist: list[str] | None = None,
     incident_limit: int = 50,
     now: datetime | None = None,
+    time_range: str = DEFAULT_TIME_RANGE,
+    config: Mapping[str, Any] | None = None,
+    started_at: float | None = None,
 ) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
+    range_key = parse_time_range(time_range)
     db_path = Path(db_path)
     jsonl_path = Path(live_monitor_jsonl_path)
-    incidents, summaries = _load_jsonl_records(jsonl_path)
-    recent_incidents = list(reversed(incidents[-max(int(incident_limit), 1):]))
+    all_incidents_raw, summaries = _load_jsonl_records(jsonl_path)
+    filtered = _filter_by_time_range(all_incidents_raw, now=now, range_key=range_key)
 
     severity_counts: Counter[str] = Counter()
     threat_counts: Counter[str] = Counter()
     technique_counts: Counter[str] = Counter()
-    blocked_actions = 0
+    blocked_actions_count = 0
     unique_attackers = set()
 
-    for incident in incidents:
+    for incident in filtered:
         severity_counts[str(incident.get("severity") or "UNKNOWN").upper()] += 1
         threat_counts[str(incident.get("threat_class") or "unknown")] += 1
         unique_attackers.add(str(incident.get("attacker_identity") or "unknown"))
         if incident.get("policy_allowed") is False:
-            blocked_actions += 1
+            blocked_actions_count += 1
         for mapping in incident.get("mitre_attack") or []:
             if not isinstance(mapping, Mapping):
                 continue
-            label = f"{mapping.get('technique_id', 'UNKNOWN')} {mapping.get('technique', 'Unknown')}".strip()
+            label = (
+                f"{mapping.get('technique_id', 'UNKNOWN')} "
+                f"{mapping.get('technique', 'Unknown')}"
+            ).strip()
             technique_counts[label] += 1
 
     db_summary = _load_db_summary(db_path)
     last_hour = now - timedelta(hours=1)
     recent_hour_incidents = sum(
         1
-        for incident in incidents
+        for incident in filtered
         if incident.get("_timestamp_dt") and incident["_timestamp_dt"] >= last_hour
     )
 
-    for incident in recent_incidents:
-        incident.pop("_timestamp_dt", None)
+    display_incidents = [
+        _strip_internal(inc)
+        for inc in sorted(
+            filtered,
+            key=lambda x: x.get("_timestamp_dt")
+            or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
+    ]
+    overview_incidents = display_incidents[: max(int(incident_limit), 1)]
 
-    # Build test-mode summary data from the latest summary record
     latest_test_summary: dict[str, Any] = {}
     recent_summaries: list[dict[str, Any]] = []
     if summaries:
@@ -157,16 +461,19 @@ def build_dashboard_state(
         for s in summaries[-10:]:
             recent_summaries.append({k: v for k, v in s.items() if not k.startswith("_")})
 
+    log_path = bifrost_paths.log_path(config) if config else db_path.parent / "guardian.log"
+
     return {
         "generated_at": now.isoformat().replace("+00:00", "Z"),
-        "paths": {
-            "db_path": str(db_path),
-            "live_monitor_jsonl_path": str(jsonl_path),
+        "time_range": range_key,
+        "connectivity": {
+            "database_connected": db_summary["connected"],
+            "live_monitor_active": _live_monitor_active(jsonl_path, now=now),
         },
         "summary": {
-            "dashboard_incidents": len(incidents),
+            "dashboard_incidents": len(filtered),
             "db_events": db_summary["total_events"],
-            "blocked_actions": blocked_actions,
+            "blocked_actions": blocked_actions_count,
             "unique_attackers": len(unique_attackers),
             "last_hour_incidents": recent_hour_incidents,
             "latest_db_event_timestamp": db_summary["latest_event_timestamp"],
@@ -174,580 +481,299 @@ def build_dashboard_state(
         "severity_counts": dict(severity_counts.most_common()),
         "top_threat_classes": [
             {"name": name, "count": count}
-            for name, count in threat_counts.most_common(8)
+            for name, count in threat_counts.most_common(12)
         ],
         "top_mitre_techniques": [
             {"name": name, "count": count}
-            for name, count in technique_counts.most_common(8)
+            for name, count in technique_counts.most_common(12)
         ],
-        "timeline": _summarize_timeline(incidents, now=now),
+        "timeline": _summarize_timeline(filtered, now=now),
+        "minute_breakdown": _build_minute_breakdown(all_incidents_raw, now=now),
         "allowlist": sorted(str(item) for item in (monitor_safelist or []) if str(item).strip()),
-        "incidents": recent_incidents,
+        "incidents": overview_incidents,
+        "all_incidents": display_incidents,
+        "blocked_actions": _build_blocked_actions(filtered),
+        "attackers": _build_attacker_profiles(filtered),
+        "db_events": _load_db_events(db_path),
         "test_mode": {
             "active": bool(latest_test_summary),
             "latest_summary": latest_test_summary,
             "recent_summaries": recent_summaries,
         },
+        "settings": build_settings_snapshot(
+            config or {},
+            db_path=db_path,
+            log_path=log_path,
+            started_at=started_at,
+        ),
+        "meta": {
+            "incident_page_size": INCIDENT_PAGE_SIZE,
+            "min_incident_rows": MIN_INCIDENT_ROWS,
+        },
     }
 
 
-def _render_key_values(title: str, items: Mapping[str, Any]) -> str:
-    rows = "".join(
-        f"<li><strong>{html.escape(str(key))}</strong>: {html.escape(str(value))}</li>"
-        for key, value in items.items()
-    )
-    return f"<section><h2>{html.escape(title)}</h2><ul>{rows or '<li>None</li>'}</ul></section>"
-
-
-def _render_ranked(title: str, rows: list[dict[str, Any]], key_name: str = "name") -> str:
-    items = "".join(
-        f"<tr><td>{html.escape(str(row.get(key_name, 'unknown')))}</td><td>{html.escape(str(row.get('count', 0)))}</td></tr>"
-        for row in rows
-    )
+def _severity_badge(severity: str) -> str:
+    sev = str(severity).upper()
+    color = SEVERITY_COLORS.get(sev, SEVERITY_COLORS["UNKNOWN"])
     return (
-        f"<section><h2>{html.escape(title)}</h2>"
-        "<table><thead><tr><th>Name</th><th>Count</th></tr></thead>"
-        f"<tbody>{items or '<tr><td colspan=2>None</td></tr>'}</tbody></table></section>"
+        f'<span class="sev-badge" style="--sev-color:{color}">'
+        f"{html.escape(sev)}</span>"
     )
 
 
 def _render_test_mode_panel(test_mode: Mapping[str, Any]) -> str:
     if not test_mode.get("active"):
         return (
-            "<div class='card'>"
-            "<h2 class='card-title'>Test Run Status</h2>"
-            "<p style='color:#b39acb'>No test-mode summary records found. "
+            '<details id="test-run-panel" class="test-mode card collapsible">'
+            '<summary class="card-title">Test Run Status</summary>'
+            '<p class="muted">No test-mode summary records found. '
             "Start Guardian with <code>--test-mode</code> to enable live-fire tracking.</p>"
-            "</div>"
+            "</details>"
         )
     s = test_mode.get("latest_summary") or {}
     total = (s.get("test_passed") or 0) + (s.get("test_failed") or 0)
-    pass_rate = s.get("test_pass_rate", 0.0)
+    pass_rate = float(s.get("test_pass_rate") or 0.0)
     pass_pct = f"{pass_rate * 100:.1f}%"
-    bar_color = "#22c55e" if pass_rate >= 0.8 else ("#f59e0b" if pass_rate >= 0.5 else "#ef4444")
+    bar_color = "#22c55e" if pass_rate >= 0.8 else ("#eab308" if pass_rate >= 0.5 else "#ff2d2d")
     bar_pct = int(pass_rate * 100)
-
-    strengths = ", ".join(s.get("strongest_areas") or []) or "n/a"
-    weaknesses = ", ".join(s.get("weakest_areas") or []) or "n/a"
-
-    queue_size = s.get("queue_size", 0)
-    queue_cap = s.get("queue_capacity", 0)
-    dropped = s.get("dropped_events", 0)
-    queue_label = f"{queue_size}/{queue_cap}" if queue_cap else str(queue_size)
-    queue_color = "#ef4444" if queue_size > (queue_cap * 0.8 if queue_cap else 0) else "#22c55e"
-
-    recent_rows = "".join(
-        "<tr>"
-        f"<td>{html.escape(str(row.get('timestamp', 'n/a')))}</td>"
-        f"<td>{html.escape(str(row.get('test_passed', 0)))}</td>"
-        f"<td>{html.escape(str(row.get('test_failed', 0)))}</td>"
-        "<td>" + html.escape(f'{(row.get("test_pass_rate") or 0.0) * 100:.1f}%') + "</td>"
-        f"<td>{html.escape(str(row.get('total_events', 0)))}</td>"
-        f"<td>{html.escape(str(row.get('dropped_events', 0)))}</td>"
-        "</tr>"
-        for row in (test_mode.get("recent_summaries") or [])
-    )
-
-    return f"""<div class="card" style="border-color:#5b2e7e;margin-bottom:1rem">
-  <h2 class="card-title">Test Run Status <span class="badge" style="background:#260c3f;color:#f9a8d4">LIVE FIRE</span></h2>
-  <div style="margin-bottom:1rem">
-    <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap">
-      <span style="font-size:0.82rem;color:#b39acb">Pass rate:</span>
-      <span style="font-size:2rem;font-weight:800;color:{bar_color}">{html.escape(pass_pct)}</span>
-      <span style="font-size:0.82rem;color:#d7b4ff">{html.escape(str(s.get('test_passed', 0)))} pass &nbsp;/&nbsp; {html.escape(str(s.get('test_failed', 0)))} fail &nbsp;/&nbsp; {html.escape(str(total))} total</span>
+    recent_rows = ""
+    for row in test_mode.get("recent_summaries") or []:
+        rate = float(row.get("test_pass_rate") or 0.0) * 100
+        recent_rows += (
+            "<tr>"
+            f"<td>{html.escape(str(row.get('timestamp', 'n/a')))}</td>"
+            f"<td>{html.escape(str(row.get('test_passed', 0)))}</td>"
+            f"<td>{html.escape(str(row.get('test_failed', 0)))}</td>"
+            f"<td>{html.escape(f'{rate:.1f}%')}</td>"
+            f"<td>{html.escape(str(row.get('total_events', 0)))}</td>"
+            f"<td>{html.escape(str(row.get('dropped_events', 0)))}</td>"
+            "</tr>"
+        )
+    return f"""<details id="test-run-panel" class="test-mode card collapsible">
+  <summary class="card-title">Test Run Status <span class="badge live">LIVE FIRE</span></summary>
+  <div class="test-body">
+    <div class="pass-rate-row">
+      <span class="muted">Pass rate</span>
+      <span class="pass-rate-value" style="color:{bar_color}">{html.escape(pass_pct)}</span>
+      <span class="muted">{html.escape(str(s.get('test_passed', 0)))} pass / {html.escape(str(s.get('test_failed', 0)))} fail</span>
     </div>
-    <div style="background:#1a0f2c;border-radius:6px;height:10px;margin-top:0.5rem;overflow:hidden;border:1px solid #5b2e7e">
-      <div style="background:{bar_color};width:{bar_pct}%;height:100%;border-radius:6px;transition:width .5s"></div>
-    </div>
+    <div class="pass-bar"><div class="pass-bar-fill" style="width:{bar_pct}%;background:{bar_color}"></div></div>
+    <table class="compact-table">
+      <thead><tr><th>Time</th><th>Pass</th><th>Fail</th><th>Rate</th><th>Events</th><th>Dropped</th></tr></thead>
+      <tbody>{recent_rows or '<tr><td colspan="6" class="muted">No summaries yet</td></tr>'}</tbody>
+    </table>
   </div>
-  <div class="grid-3" style="margin-bottom:0.75rem">
-    <div style="background:#1a0f2c;border-radius:8px;padding:0.6rem 0.9rem;border:1px solid #5b2e7e">
-      <div style="font-size:0.65rem;color:#b39acb;text-transform:uppercase;letter-spacing:.08em">Events</div>
-      <div style="font-size:1.4rem;font-weight:700;color:#c4b5fd">{html.escape(str(s.get('total_events', 0)))}</div>
-    </div>
-    <div style="background:#1a0f2c;border-radius:8px;padding:0.6rem 0.9rem;border:1px solid #5b2e7e">
-      <div style="font-size:0.65rem;color:#b39acb;text-transform:uppercase;letter-spacing:.08em">Incidents</div>
-      <div style="font-size:1.4rem;font-weight:700;color:#d946ef">{html.escape(str(s.get('incidents', 0)))}</div>
-    </div>
-    <div style="background:#1a0f2c;border-radius:8px;padding:0.6rem 0.9rem;border:1px solid #5b2e7e">
-      <div style="font-size:0.65rem;color:#b39acb;text-transform:uppercase;letter-spacing:.08em">Blocked</div>
-      <div style="font-size:1.4rem;font-weight:700;color:#f472b6">{html.escape(str(s.get('blocked_actions', 0)))}</div>
-    </div>
-  </div>
-  <ul style="font-size:0.82rem;list-style:none;padding:0;display:flex;flex-direction:column;gap:0.3rem">
-    <li><span style="color:#b39acb">Unique attackers:</span> {html.escape(str(s.get('unique_attackers', 0)))} &nbsp;<span style="color:#b39acb">(repeat: {html.escape(str(s.get('repeat_attackers', 0)))}, new: {html.escape(str(s.get('new_attackers', 0)))})</span></li>
-    <li><span style="color:#b39acb">Suppressed:</span> {html.escape(str(s.get('suppressed', 0)))} &nbsp;<span style="color:#b39acb">(FP queue: {html.escape(str(s.get('possible_false_positive_queue', 0)))})</span></li>
-    <li><span style="color:#b39acb">Queue:</span> <span style="color:{queue_color};font-weight:600">{html.escape(queue_label)}</span> &nbsp; <span style="color:#b39acb">Dropped:</span> <span style="color:{'#ef4444' if dropped else '#22c55e'};font-weight:600">{html.escape(str(dropped))}</span></li>
-    <li><span style="color:#b39acb">Strongest:</span> <span style="color:#a7f3d0">{html.escape(strengths)}</span></li>
-    <li><span style="color:#b39acb">Weakest:</span> <span style="color:#fcd34d">{html.escape(weaknesses)}</span></li>
-    <li><span style="color:#b39acb">Last summary:</span> {html.escape(str(s.get('timestamp', 'n/a')))}</li>
-  </ul>
-  <h3 style="margin-top:1rem;font-size:0.75rem;color:#b39acb;text-transform:uppercase;letter-spacing:.1em">Recent periodic summaries (last 10)</h3>
-  <table style="margin-top:0.5rem">
-    <thead><tr><th>Time</th><th>Pass</th><th>Fail</th><th>Pass %</th><th>Events</th><th>Dropped</th></tr></thead>
-    <tbody>{recent_rows or '<tr><td colspan=6 style="color:#b39acb">No summaries yet</td></tr>'}</tbody>
-  </table>
-</div>"""
-
-
-def _severity_badge(severity: str) -> str:
-    """Return an HTML badge span for a severity string."""
-    sev = str(severity).upper()
-    colors = {
-        "CRITICAL": ("#ec4899", "#fff"),
-        "HIGH": ("#d946ef", "#fff"),
-        "MEDIUM": ("#c084fc", "#13091f"),
-        "LOW": ("#60a5fa", "#081121"),
-        "INFO": ("#c4b5fd", "#13091f"),
-    }
-    bg, fg = colors.get(sev, ("#5b2e7e", "#fff"))
-    return (
-        f'<span style="background:{bg};color:{fg};padding:2px 8px;'
-        f'border-radius:999px;font-size:0.72rem;font-weight:700;'
-        f'letter-spacing:0.05em;white-space:nowrap">'
-        f"{html.escape(sev)}</span>"
-    )
+</details>"""
 
 
 def render_dashboard_html(state: Mapping[str, Any]) -> str:
-    summary = state.get("summary", {})
-    severity_counts = state.get("severity_counts", {})
-    test_mode = state.get("test_mode") or {}
-    generated_at = str(state.get("generated_at", ""))
-
-    # — stat cards row —
-    stat_cards = [
-        ("Total Events", str(summary.get("db_events", 0)), "#c4b5fd", "⬡"),
-        ("Incidents", str(summary.get("dashboard_incidents", 0)), "#d946ef", "⚡"),
-        ("Blocked", str(summary.get("blocked_actions", 0)), "#f472b6", "🛡"),
-        ("Unique Attackers", str(summary.get("unique_attackers", 0)), "#818cf8", "👤"),
-        ("Last Hour", str(summary.get("last_hour_incidents", 0)), "#67e8f9", "⏱"),
-    ]
-    stat_html = "".join(
-        f"""<div class="stat-card">
-  <div class="stat-icon" style="color:{color}">{icon}</div>
-  <div class="stat-value" style="color:{color}">{html.escape(val)}</div>
-  <div class="stat-label">{html.escape(label)}</div>
-</div>"""
-        for label, val, color, icon in stat_cards
+    """Render the full dashboard shell (client hydrates from /api/state)."""
+    css = _load_ui_asset("style.css")
+    js = _load_ui_asset("app.js")
+    bootstrap = json.dumps(state, default=str).replace("</", "<\\/")
+    disclaimer_escaped = html.escape(DISCLAIMER_TEXT)
+    favicon_svg = (
+        "data:image/svg+xml,"
+        "%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E"
+        "%3Ctext y='82' x='50' text-anchor='middle' font-size='72'%3E🌉%3C/text%3E"
+        "%3C/svg%3E"
     )
-
-    # — severity breakdown —
-    sev_order = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "UNKNOWN"]
-    sev_rows = ""
-    for sev in sev_order:
-        cnt = severity_counts.get(sev, 0)
-        if cnt:
-            sev_rows += (
-                f"<tr><td>{_severity_badge(sev)}</td>"
-                f"<td style='text-align:right;font-weight:600'>{html.escape(str(cnt))}</td></tr>"
-            )
-    if not sev_rows:
-        sev_rows = "<tr><td colspan=2 style='color:#b39acb'>No incidents yet</td></tr>"
-
-    # — threat classes —
-    threat_rows = "".join(
-        f"<tr><td>{html.escape(str(row.get('name','?')))}</td>"
-        f"<td style='text-align:right'>{html.escape(str(row.get('count',0)))}</td></tr>"
-        for row in state.get("top_threat_classes", [])
-    ) or "<tr><td colspan=2 style='color:#b39acb'>None</td></tr>"
-
-    # — MITRE techniques —
-    mitre_rows = "".join(
-        f"<tr><td><code style='font-size:0.78rem'>{html.escape(str(row.get('name','?')))}</code></td>"
-        f"<td style='text-align:right'>{html.escape(str(row.get('count',0)))}</td></tr>"
-        for row in state.get("top_mitre_techniques", [])
-    ) or "<tr><td colspan=2 style='color:#b39acb'>None</td></tr>"
-
-    # — incident rows —
-    incident_rows = []
-    for incident in state.get("incidents", []):
-        mitre_attack = incident.get("mitre_attack") or []
-        mitre_summary = ", ".join(
-            f"{item.get('technique_id', '?')} {item.get('technique', '?')}"
-            for item in mitre_attack
-            if isinstance(item, Mapping)
-        ) or "—"
-        sev = str(incident.get("severity", "UNKNOWN"))
-        incident_rows.append(
-            "<tr>"
-            f"<td style='font-size:0.78rem;white-space:nowrap'>{html.escape(str(incident.get('timestamp','n/a')))}</td>"
-            f"<td>{_severity_badge(sev)}</td>"
-            f"<td style='font-size:0.82rem'>{html.escape(str(incident.get('threat_class','?')))}</td>"
-            f"<td style='font-size:0.82rem'>{html.escape(str(incident.get('attacker_identity','?')))}</td>"
-            f"<td style='font-size:0.75rem;color:#d7b4ff'>{html.escape(mitre_summary)}</td>"
-            f"<td style='font-size:0.8rem;font-weight:600'>{html.escape(str(incident.get('action_taken','NONE')))}</td>"
-            f"<td style='font-size:0.78rem;color:#f4eaff'>{html.escape(str(incident.get('summary','')))}</td>"
-            "</tr>"
-        )
-
-    incidents_body = "".join(incident_rows) or (
-        "<tr><td colspan=7 style='color:#b39acb;text-align:center;padding:1.5rem'>"
-        "No incidents recorded yet</td></tr>"
-    )
-
-    # — timeline mini-chart —
-    timeline_data = state.get("timeline", [])
-    if timeline_data:
-        max_cnt = max((row.get("count", 0) for row in timeline_data), default=1) or 1
-        tl_bars = "".join(
-            f"""<div class="tl-bar-wrap" title="{html.escape(str(row.get('minute','')))} — {html.escape(str(row.get('count',0)))} incidents">
-  <div class="tl-bar" style="height:{max(4, int(row.get('count',0)/max_cnt*80))}px"></div>
-  <div class="tl-cnt">{html.escape(str(row.get('count',0)))}</div>
-</div>"""
-            for row in timeline_data[-30:]
-        )
-        timeline_section = f"""<section class="card">
-  <h2 class="card-title">Activity Timeline <span class="badge">last 60 min</span></h2>
-  <div class="tl-chart">{tl_bars}</div>
-</section>"""
-    else:
-        timeline_section = """<section class="card">
-  <h2 class="card-title">Activity Timeline</h2>
-  <p style="color:#b39acb;margin:0">No recent activity</p>
-</section>"""
-
-    # — allowlist —
-    allowlist_items = "".join(
-        f"<li>{html.escape(str(e))}</li>" for e in state.get("allowlist", [])
-    ) or "<li style='color:#b39acb'>Empty</li>"
-
-    # — test mode panel —
-    test_panel = _render_test_mode_panel(test_mode)
-
-    # — paths —
-    db_path = html.escape(str(state.get("paths", {}).get("db_path", "n/a")))
-    jsonl_path = html.escape(str(state.get("paths", {}).get("live_monitor_jsonl_path", "n/a")))
-
     return f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Bifrost \u2014 Heimdall Dashboard</title>
+  <meta name="theme-color" content="#080808">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="application-name" content="Bifrost">
+  <title>Bifrost — Heimdall Security Dashboard</title>
+  <link rel="icon" type="image/svg+xml" href="{favicon_svg}">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&amp;family=JetBrains+Mono:wght@400;600;700&amp;display=swap" rel="stylesheet">
   <style>
-    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    :root {{
-      --bg: #0b0314;
-      --surface: #160824;
-      --surface2: #221038;
-      --border: #5b2e7e;
-      --text: #f4eaff;
-      --text-dim: #b39acb;
-      --accent: #a855f7;
-      --accent2: #d946ef;
-      --red: #f472b6;
-      --orange: #f9a8d4;
-      --yellow: #fbcfe8;
-      --green: #67e8f9;
-      --teal: #818cf8;
-    }}
-    html {{ font-size: 15px; }}
-    body {{
-      font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      min-height: 100vh;
-      display: flex;
-      flex-direction: column;
-    }}
-
-    /* ── Header ── */
-    .header {{
-      background: linear-gradient(135deg, #210a33 0%, #341058 50%, #1a0930 100%);
-      border-bottom: 1px solid var(--border);
-      padding: 0 1.75rem;
-      display: flex;
-      align-items: center;
-      gap: 1rem;
-      height: 62px;
-    }}
-    .logo {{
-      font-size: 1.25rem;
-      font-weight: 800;
-      letter-spacing: -0.02em;
-      background: linear-gradient(90deg, #c4b5fd, #d946ef, #f472b6, #818cf8);
-      background-size: 200%;
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
-      animation: shimmer 4s linear infinite;
-    }}
-    @keyframes shimmer {{ to {{ background-position: -200%; }} }}
-    .logo-sub {{
-      font-size: 0.72rem;
-      color: var(--text-dim);
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      margin-left: 0.25rem;
-    }}
-    .header-spacer {{ flex: 1; }}
-    .live-dot {{
-      width: 8px; height: 8px;
-      border-radius: 50%;
-      background: var(--green);
-      box-shadow: 0 0 8px var(--green);
-      animation: pulse 2s ease-in-out infinite;
-    }}
-    @keyframes pulse {{
-      0%, 100% {{ opacity: 1; box-shadow: 0 0 8px var(--green); }}
-      50% {{ opacity: 0.55; box-shadow: 0 0 3px var(--green); }}
-    }}
-    .live-label {{ font-size: 0.72rem; color: var(--green); font-weight: 600; letter-spacing: 0.06em; }}
-    .ts {{ font-size: 0.72rem; color: var(--text-dim); }}
-    .refresh-btn {{
-      background: var(--surface2);
-      border: 1px solid var(--border);
-      color: var(--text);
-      padding: 5px 14px;
-      border-radius: 6px;
-      cursor: pointer;
-      font-size: 0.78rem;
-      transition: border-color .2s;
-    }}
-    .refresh-btn:hover {{ border-color: var(--accent); color: #fff; }}
-    .auto-toggle {{ font-size: 0.75rem; color: var(--text-dim); display: flex; align-items: center; gap: 5px; }}
-    .auto-toggle input {{ accent-color: var(--accent); }}
-
-    /* ── Layout ── */
-    .main {{ padding: 1.5rem 1.75rem; flex: 1; }}
-
-    /* ── Stat cards ── */
-    .stat-row {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-      gap: 1rem;
-      margin-bottom: 1.5rem;
-    }}
-    .stat-card {{
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 1rem 1.25rem;
-      display: flex;
-      flex-direction: column;
-      gap: 0.25rem;
-      transition: border-color .2s, transform .15s;
-    }}
-    .stat-card:hover {{ border-color: var(--accent); transform: translateY(-2px); }}
-    .stat-icon {{ font-size: 1.4rem; line-height: 1; }}
-    .stat-value {{ font-size: 2rem; font-weight: 800; line-height: 1; letter-spacing: -0.03em; }}
-    .stat-label {{ font-size: 0.72rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.08em; }}
-
-    /* ── Grid / cards ── */
-    .grid-2 {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem; margin-bottom: 1rem; }}
-    .grid-3 {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; margin-bottom: 1rem; }}
-    .card {{
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 1.1rem 1.25rem;
-      margin-bottom: 1rem;
-    }}
-    .card-title {{
-      font-size: 0.82rem;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.1em;
-      color: #d7b4ff;
-      margin-bottom: 0.85rem;
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }}
-    .badge {{
-      background: #33144f;
-      color: #f9a8d4;
-      font-size: 0.65rem;
-      padding: 2px 7px;
-      border-radius: 999px;
-      font-weight: 600;
-      text-transform: none;
-      letter-spacing: 0.04em;
-    }}
-
-    /* ── Tables ── */
-    table {{ width: 100%; border-collapse: collapse; font-size: 0.82rem; }}
-    th {{
-      font-size: 0.7rem;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.1em;
-      color: var(--text-dim);
-      padding: 0.5rem 0.5rem;
-      border-bottom: 1px solid var(--border);
-      text-align: left;
-    }}
-    td {{
-      padding: 0.55rem 0.5rem;
-      border-bottom: 1px solid #0f1e34;
-      vertical-align: top;
-    }}
-    tr:last-child td {{ border-bottom: none; }}
-    tr:hover td {{ background: rgba(217,70,239,0.08); }}
-
-    /* ── Timeline chart ── */
-    .tl-chart {{
-      display: flex;
-      align-items: flex-end;
-      gap: 3px;
-      height: 90px;
-      overflow-x: auto;
-      padding-bottom: 0.25rem;
-    }}
-    .tl-bar-wrap {{
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 2px;
-      min-width: 18px;
-    }}
-    .tl-bar {{
-      width: 14px;
-      background: linear-gradient(180deg, #d946ef, #818cf8);
-      border-radius: 3px 3px 0 0;
-      transition: height .3s;
-    }}
-    .tl-cnt {{ font-size: 0.6rem; color: var(--text-dim); }}
-
-    /* ── Paths row ── */
-    .paths-row {{ font-size: 0.72rem; color: var(--text-dim); margin-bottom: 1.25rem; }}
-    .paths-row code {{ color: #f9a8d4; background: #210a33; padding: 1px 5px; border-radius: 4px; }}
-
-    ul {{ padding-left: 1.2rem; }}
-    li {{ font-size: 0.82rem; padding: 0.2rem 0; }}
-    code {{ color: #f9a8d4; font-size: 0.82rem; }}
-
-    /* ── Incidents table ── */
-    .incidents-wrap {{ overflow-x: auto; }}
-
-    /* ── Scrollbar ── */
-    ::-webkit-scrollbar {{ width: 6px; height: 6px; }}
-    ::-webkit-scrollbar-track {{ background: var(--bg); }}
-    ::-webkit-scrollbar-thumb {{ background: var(--border); border-radius: 3px; }}
+{css}
   </style>
 </head>
-<body>
-<header class="header">
-  <div>
-    <span class="logo">⬡ Bifrost</span>
-    <span class="logo-sub">Heimdall Dashboard</span>
+<body class="disclaimer-locked">
+<div id="disclaimer-modal" class="modal-overlay" role="dialog" aria-modal="true">
+  <div class="modal-card">
+    <h1>Authorized Use Agreement</h1>
+    <div id="disclaimer-scroll" class="disclaimer-scroll">{disclaimer_escaped.replace(chr(10), '<br>')}</div>
+    <button id="disclaimer-accept" class="btn primary" disabled>Accept and Continue</button>
   </div>
-  <div class="header-spacer"></div>
-  <div class="live-dot"></div>
-  <span class="live-label">LIVE</span>
-  <span class="ts">{html.escape(generated_at)}</span>
-  <button class="refresh-btn" type="button" onclick="window.location.reload()">↺ Refresh</button>
-  <label class="auto-toggle">
-    <input id="auto-refresh" type="checkbox" checked aria-label="Toggle automatic refresh">
-    Auto 5s
-  </label>
-</header>
+</div>
 
-<main class="main">
-  <div class="paths-row">
-    DB: <code>{db_path}</code> &nbsp;·&nbsp; JSONL: <code>{jsonl_path}</code>
-  </div>
-
-  <!-- Stat cards -->
-  <div class="stat-row">{stat_html}</div>
-
-  <!-- Test-mode panel -->
-  {test_panel}
-
-  <!-- Middle grid: severity + threats + MITRE -->
-  <div class="grid-3">
-    <div class="card">
-      <h2 class="card-title">Severity Breakdown</h2>
-      <table>
-        <thead><tr><th>Level</th><th style="text-align:right">Count</th></tr></thead>
-        <tbody>{sev_rows}</tbody>
-      </table>
+<div class="app-shell" id="app" hidden>
+  <aside class="sidebar">
+    <div class="logo-wrap">
+      <span class="logo">Bifrost</span>
+      <span class="logo-sub">Rainbow Bridge</span>
     </div>
-    <div class="card">
-      <h2 class="card-title">Top Threat Classes</h2>
-      <table>
-        <thead><tr><th>Class</th><th style="text-align:right">Hits</th></tr></thead>
-        <tbody>{threat_rows}</tbody>
-      </table>
-    </div>
-    <div class="card">
-      <h2 class="card-title">Top MITRE Techniques</h2>
-      <table>
-        <thead><tr><th>Technique</th><th style="text-align:right">Hits</th></tr></thead>
-        <tbody>{mitre_rows}</tbody>
-      </table>
-    </div>
+    <nav class="nav">
+      <button type="button" class="nav-item active" data-view="overview">Overview</button>
+      <button type="button" class="nav-item" data-view="incidents">Incidents</button>
+      <button type="button" class="nav-item" data-view="attackers">Attackers</button>
+      <button type="button" class="nav-item" data-view="timeline">Timeline</button>
+      <button type="button" class="nav-item" data-view="settings">Settings</button>
+    </nav>
+  </aside>
+
+  <div class="main-column">
+    <header class="top-header">
+      <div class="header-title">
+        <h1>Heimdall Security Dashboard</h1>
+        <span class="ts" id="generated-at"></span>
+      </div>
+      <div class="status-pills">
+        <span class="pill" id="db-status"><span class="dot ok"></span> Database: Connected</span>
+        <span class="pill" id="monitor-status"><span class="dot ok"></span> Live Monitor: Active</span>
+      </div>
+      <div class="header-actions">
+        <div class="range-group" id="time-range">
+          <button type="button" data-range="1h">1H</button>
+          <button type="button" data-range="24h" class="active">24H</button>
+          <button type="button" data-range="7d">7D</button>
+          <button type="button" data-range="30d">30D</button>
+          <button type="button" data-range="all">ALL</button>
+        </div>
+        <button type="button" class="icon-btn" id="settings-gear" title="Settings">⚙</button>
+        <label class="auto-toggle"><input id="auto-refresh" type="checkbox" checked> Auto 5s</label>
+      </div>
+    </header>
+
+    <main class="content">
+      <section id="view-overview" class="view active">
+        <div class="stat-row" id="stat-cards"></div>
+        {_render_test_mode_panel(state.get("test_mode") or {})}
+        <div class="grid-3" id="breakdown-cards"></div>
+        <div class="card" id="timeline-card"></div>
+        <div class="card">
+          <h2 class="card-title">Recent Incidents <span class="badge" id="incident-count-badge"></span></h2>
+          <div class="table-scroll" id="overview-incidents-table"></div>
+        </div>
+      </section>
+
+      <section id="view-incidents" class="view">
+        <div class="card">
+          <h2 class="card-title">All Incidents</h2>
+          <div class="table-scroll tall" id="incidents-full-table"></div>
+          <div class="pager" id="incidents-pager"></div>
+        </div>
+      </section>
+
+      <section id="view-attackers" class="view">
+        <div class="card">
+          <div class="card-head-row">
+            <h2 class="card-title">Attacker Profiles</h2>
+            <select id="attacker-sort">
+              <option value="hits">Sort: Hits</option>
+              <option value="first_seen">Sort: First Seen</option>
+              <option value="last_seen">Sort: Last Seen</option>
+              <option value="threat">Sort: Threat Level</option>
+            </select>
+          </div>
+          <div class="table-scroll tall" id="attackers-table"></div>
+        </div>
+        <div class="card" id="attacker-detail-card" hidden>
+          <h2 class="card-title">Attacker Timeline — <span id="attacker-detail-ip"></span></h2>
+          <div class="table-scroll" id="attacker-detail-events"></div>
+        </div>
+      </section>
+
+      <section id="view-timeline" class="view">
+        <div class="card" id="timeline-full-card"></div>
+      </section>
+
+      <section id="view-settings" class="view">
+        <div class="card" id="settings-panel"></div>
+      </section>
+    </main>
   </div>
+</div>
 
-  <!-- Timeline -->
-  {timeline_section}
-
-  <!-- Recent Incidents -->
-  <div class="card">
-    <h2 class="card-title">Recent Incidents <span class="badge">last 50</span></h2>
-    <div class="incidents-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Timestamp</th><th>Severity</th><th>Threat</th><th>Attacker</th>
-            <th>MITRE</th><th>Action</th><th>Summary</th>
-          </tr>
-        </thead>
-        <tbody>{incidents_body}</tbody>
-      </table>
-    </div>
+<div id="detail-overlay" class="detail-overlay" hidden>
+  <div class="detail-panel">
+    <button type="button" class="detail-close" id="detail-close">×</button>
+    <div id="detail-content"></div>
   </div>
+</div>
 
-  <!-- Allowlist -->
-  <div class="card">
-    <h2 class="card-title">Monitor Allowlist</h2>
-    <ul>{allowlist_items}</ul>
-  </div>
-</main>
-
+<script type="application/json" id="bifrost-bootstrap">{bootstrap}</script>
 <script>
-(function() {{
-  var refreshTimer = null;
-  function scheduleRefresh() {{
-    clearTimeout(refreshTimer);
-    var toggle = document.getElementById('auto-refresh');
-    if (toggle && toggle.checked) {{
-      refreshTimer = setTimeout(function() {{ window.location.reload(); }}, 5000);
-    }}
-  }}
-  var toggle = document.getElementById('auto-refresh');
-  if (toggle) {{
-    toggle.addEventListener('change', scheduleRefresh);
-  }}
-  scheduleRefresh();
-}})();
+{js}
 </script>
 </body>
 </html>"""
 
 
+def _load_ui_asset(name: str) -> str:
+    path = Path(__file__).resolve().parent / "dashboard_ui" / name
+    return path.read_text(encoding="utf-8")
+
+
+_DASHBOARD_CSS = _load_ui_asset("style.css")
+_DASHBOARD_JS = _load_ui_asset("app.js")
+
+
+def _parse_cookie_value(header: str, key: str) -> str | None:
+    jar = SimpleCookie()
+    try:
+        jar.load(header or "")
+    except Exception:
+        return None
+    if key not in jar:
+        return None
+    return jar[key].value
+
+
+def _disclaimer_accepted(handler: BaseHTTPRequestHandler) -> bool:
+    sid = _parse_cookie_value(handler.headers.get("Cookie", ""), _DISCLAIMER_COOKIE)
+    return bool(sid and sid in _DISCLAIMER_SESSIONS)
+
+
 def _build_handler(server: "DashboardServer"):
     class DashboardHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
-            state = server.build_state()
-            if self.path in {"/healthz", "/health"}:
-                self._write_json({"ok": True, "generated_at": state["generated_at"]})
+            parsed = urlparse(self.path)
+            path = parsed.path
+            query = parse_qs(parsed.query)
+
+            if path in {"/healthz", "/health"}:
+                self._write_json({"ok": True})
                 return
-            if self.path == "/api/state":
-                self._write_json(state)
-                return
-            if self.path == "/api/summary":
-                tm = state.get("test_mode") or {}
-                payload: dict[str, Any] = {
-                    "active": tm.get("active", False),
-                    "latest_summary": tm.get("latest_summary") or {},
-                }
+
+            if path == "/api/state":
+                if not _disclaimer_accepted(self):
+                    self.send_response(HTTPStatus.FORBIDDEN)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(b'{"error":"disclaimer_required"}')
+                    return
+                range_key = parse_time_range(
+                    (query.get("range") or [DEFAULT_TIME_RANGE])[0]
+                )
+                payload = server.build_state(time_range=range_key)
                 self._write_json(payload)
                 return
-            if self.path not in {"/", ""}:
+
+            if path == "/api/summary":
+                state = server.build_state()
+                tm = state.get("test_mode") or {}
+                self._write_json(
+                    {
+                        "active": tm.get("active", False),
+                        "latest_summary": tm.get("latest_summary") or {},
+                    }
+                )
+                return
+
+            if path not in {"/", ""}:
                 self.send_error(HTTPStatus.NOT_FOUND, "Not found")
                 return
+
+            state = server.build_state()
             payload_html = render_dashboard_html(state).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -755,11 +781,29 @@ def _build_handler(server: "DashboardServer"):
             self.end_headers()
             self.wfile.write(payload_html)
 
+        def do_POST(self) -> None:  # noqa: N802
+            if urlparse(self.path).path == "/api/disclaimer/accept":
+                sid = secrets.token_urlsafe(24)
+                _DISCLAIMER_SESSIONS.add(sid)
+                cookie = SimpleCookie()
+                cookie[_DISCLAIMER_COOKIE] = sid
+                cookie[_DISCLAIMER_COOKIE]["path"] = "/"
+                cookie[_DISCLAIMER_COOKIE]["httponly"] = True
+                cookie[_DISCLAIMER_COOKIE]["samesite"] = "Strict"
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                for morsel in cookie.values():
+                    self.send_header("Set-Cookie", morsel.OutputString())
+                self.end_headers()
+                self.wfile.write(b'{"status":"accepted"}')
+                return
+            self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+
         def log_message(self, fmt: str, *args: Any) -> None:
             server.log.debug("dashboard %s - %s", self.address_string(), fmt % args)
 
         def _write_json(self, payload: Mapping[str, Any]) -> None:
-            encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
+            encoded = json.dumps(payload, default=str).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(encoded)))
@@ -790,13 +834,17 @@ class DashboardServer(threading.Thread):
         self.incident_limit = int(self.config.get("dashboard_incident_limit") or 50)
         self.monitor_safelist = list(self.config.get("monitor_safelist") or [])
         self._server: ThreadingHTTPServer | None = None
+        self._started_at = time.time()
 
-    def build_state(self) -> dict[str, Any]:
+    def build_state(self, time_range: str = DEFAULT_TIME_RANGE) -> dict[str, Any]:
         return build_dashboard_state(
             db_path=self.db_path,
             live_monitor_jsonl_path=self.jsonl_path,
             monitor_safelist=self.monitor_safelist,
             incident_limit=self.incident_limit,
+            time_range=time_range,
+            config=self.config,
+            started_at=self._started_at,
         )
 
     @property
