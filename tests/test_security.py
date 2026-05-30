@@ -85,7 +85,6 @@ def test_is_production_mode_development(monkeypatch):
 def test_ingest_rejects_without_token_in_production(monkeypatch):
     from http.client import HTTPConnection
     from queue import Queue
-    import threading
     import time
 
     from bifrost.ingest import IngestServer
@@ -95,11 +94,17 @@ def test_ingest_rejects_without_token_in_production(monkeypatch):
 
     q = Queue(maxsize=10)
     server = IngestServer(q, ingest_token="test-ingest-token")
+    server.PORT = 0
     server.start()
-    time.sleep(0.3)
+
+    deadline = time.time() + 2.0
+    while time.time() < deadline and server.server is None:
+        time.sleep(0.01)
+    assert server.server is not None
+    port = server.server.server_port
 
     try:
-        conn = HTTPConnection("127.0.0.1", 8765, timeout=3)
+        conn = HTTPConnection("127.0.0.1", port, timeout=3)
         body = json.dumps({
             "source": "test",
             "timestamp": "2026-01-01T00:00:00Z",
@@ -130,11 +135,17 @@ def test_ingest_accepts_valid_token(monkeypatch):
 
     q = Queue(maxsize=10)
     server = IngestServer(q, ingest_token=token)
+    server.PORT = 0
     server.start()
-    time.sleep(0.3)
+
+    deadline = time.time() + 2.0
+    while time.time() < deadline and server.server is None:
+        time.sleep(0.01)
+    assert server.server is not None
+    port = server.server.server_port
 
     try:
-        conn = HTTPConnection("127.0.0.1", 8765, timeout=3)
+        conn = HTTPConnection("127.0.0.1", port, timeout=3)
         body = json.dumps({
             "source": "test",
             "timestamp": "2026-01-01T00:00:00Z",
