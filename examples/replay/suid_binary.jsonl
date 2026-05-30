@@ -1,0 +1,3 @@
+{"event_id":"suid-001","type":"suid_binary_created","severity":0.85,"pid":6290,"process_name":"cp","file_path":"/usr/local/bin/.cache-helper","mode":"4755","evidence_count":2,"is_system_process":false,"note":"Unexpected SUID bit on newly copied binary"}
+{"event_id":"suid-002","type":"suid_binary_created","severity":0.93,"pid":6291,"process_name":"chmod","file_path":"/usr/local/bin/.cache-helper","mode":"4755","evidence_count":4,"is_system_process":false,"note":"Privilege escalation persistence via SUID"}
+{"event_id":"suid-003","type":"suspicious_spawn","severity":0.9,"pid":6295,"process_name":".cache-helper","evidence_count":3,"is_system_process":false,"note":"New SUID binary executed by untrusted user context"}

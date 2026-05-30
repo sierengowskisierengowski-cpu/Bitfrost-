@@ -1,0 +1,5 @@
+{"event_id":"brst-001","type":"brute_force_ssh","severity":0.66,"src_ip":"203.0.113.41","dest_ip":"192.168.56.10","dest_port":22,"evidence_count":2,"is_system_process":true,"note":"Login burst begins"}
+{"event_id":"brst-002","type":"port_scan","severity":0.74,"pid":8111,"process_name":"python3","dest_ip":"10.0.0.0/24","evidence_count":2,"is_system_process":false,"note":"Rapid internal scan after foothold"}
+{"event_id":"brst-003","type":"scratch_space_exec","severity":0.87,"pid":8118,"process_name":"bash","file_path":"/dev/shm/run.sh","evidence_count":3,"is_system_process":false,"note":"Payload run from memory-backed path"}
+{"event_id":"brst-004","type":"credential_theft_chain","severity":0.9,"pid":8122,"process_name":"grep","target_file":"/etc/shadow","evidence_count":3,"is_system_process":false,"note":"Credential harvesting in same kill-chain"}
+{"event_id":"brst-005","type":"systemd_persistence","severity":0.88,"pid":8129,"process_name":"systemctl","unit":"watchdog-update.service","evidence_count":4,"is_system_process":false,"note":"Persistence attempt before cleanup"}

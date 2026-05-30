@@ -1,0 +1,3 @@
+{"event_id":"per-001","type":"systemd_persistence","severity":0.78,"pid":3110,"process_name":"systemctl","unit":"update-agent.service","evidence_count":2,"is_system_process":false,"note":"New service unit created in /etc/systemd/system"}
+{"event_id":"per-002","type":"systemd_persistence","severity":0.89,"pid":3110,"process_name":"systemctl","unit":"update-agent.service","evidence_count":3,"is_system_process":false,"note":"Service enabled for multi-user target"}
+{"event_id":"per-003","type":"suspicious_spawn","severity":0.83,"pid":3118,"parent_pid":3110,"process_name":"/usr/local/bin/update-agent","evidence_count":2,"is_system_process":false,"note":"Unsigned binary launched by new persistent unit"}

@@ -18,6 +18,7 @@ bifrost_tokens.env
 # Log and audit files
 *.log
 *.jsonl
+!examples/replay/*.jsonl
 logs/
 db/
 

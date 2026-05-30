@@ -1,0 +1,3 @@
+{"event_id":"ia-001","type":"brute_force_ssh","severity":0.68,"src_ip":"45.83.64.11","dest_ip":"192.168.56.10","dest_port":22,"process_name":"sshd","evidence_count":2,"is_system_process":true,"note":"Repeated failed root logins from new ASN"}
+{"event_id":"ia-002","type":"brute_force_ssh","severity":0.81,"src_ip":"45.83.64.11","dest_ip":"192.168.56.10","dest_port":22,"process_name":"sshd","evidence_count":4,"is_system_process":true,"note":"Credential stuffing pattern with rotating usernames"}
+{"event_id":"ia-003","type":"suspicious_spawn","severity":0.86,"src_ip":"45.83.64.11","pid":4412,"process_name":"bash","evidence_count":3,"is_system_process":false,"note":"Interactive shell spawned after anomalous SSH success"}

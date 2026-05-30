@@ -1,0 +1,3 @@
+{"event_id":"exe-001","type":"scratch_space_exec","severity":0.84,"pid":9211,"process_name":"python3","file_path":"/tmp/.cache/updater.py","evidence_count":2,"is_system_process":false,"note":"Execution from /tmp path with network egress"}
+{"event_id":"exe-002","type":"scratch_space_exec","severity":0.92,"pid":9211,"process_name":"python3","file_path":"/tmp/.cache/updater.py","dest_ip":"185.220.101.32","evidence_count":4,"is_system_process":false,"note":"Repeated beacon attempts from ephemeral binary"}
+{"event_id":"exe-003","type":"suspicious_spawn","severity":0.95,"pid":9220,"parent_pid":9211,"process_name":"curl","dest_ip":"185.220.101.32","evidence_count":3,"is_system_process":false,"note":"Dropper spawned curl to fetch second stage"}

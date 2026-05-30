@@ -1,0 +1,3 @@
+{"event_id":"dep-001","type":"dependency_down","severity":0.42,"service":"vector-ingest","status":"timeout","evidence_count":1,"is_system_process":true,"note":"Ingest dependency timed out during replay"}
+{"event_id":"dep-002","type":"dependency_down","severity":0.5,"service":"siem-forwarder","status":"connection_refused","evidence_count":2,"is_system_process":true,"note":"Secondary dependency unavailable"}
+{"event_id":"dep-003","type":"benign_web","severity":0.18,"process_name":"healthcheck","dest_ip":"1.1.1.1","evidence_count":1,"is_system_process":true,"note":"Control event confirms collector still alive"}
