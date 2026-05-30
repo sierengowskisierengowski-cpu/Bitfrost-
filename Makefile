@@ -44,10 +44,9 @@ demo-all-attacks:
 	python3 -m bifrost.demo --scenario examples/replay/execution_tmp_exec.jsonl
 	python3 -m bifrost.demo --scenario examples/replay/persistence_systemd.jsonl
 	python3 -m bifrost.demo --scenario examples/replay/credential_access_chain.jsonl
+	python3 -m bifrost.demo --scenario examples/replay/port_scan.jsonl
 	python3 -m bifrost.demo --scenario examples/replay/lateral_movement.jsonl
 	python3 -m bifrost.demo --scenario examples/replay/suid_binary.jsonl
-	python3 -m bifrost.demo --scenario examples/replay/burst_replay.jsonl
-	python3 -m bifrost.demo --scenario examples/replay/ingest_dependency_down.jsonl
 
 test:
 	python3 -m pytest tests/ -v

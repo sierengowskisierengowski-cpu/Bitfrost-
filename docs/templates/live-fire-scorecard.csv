@@ -1,11 +1,29 @@
 run_id,phase,scenario,mode,expected_threat_class,expected_action,policy_allowed_expected,policy_allowed_actual,detection_latency_ms,false_positive,false_negative,action_correct,service_stable,notes
-2026-06-01-run01,phase1,benign_web_burst,learning+dry-run,none,LOG,false,false,0,false,false,true,true,
-2026-06-01-run01,phase2,initial_access,learning+dry-run,brute_force_ssh,LOG,false,false,0,false,false,true,true,
-2026-06-01-run01,phase2,execution_tmp_exec,learning+dry-run,scratch_space_exec,KILL,false,false,0,false,false,true,true,
-2026-06-01-run01,phase2,persistence_systemd,learning+dry-run,systemd_persistence,ALERT,false,false,0,false,false,true,true,
-2026-06-01-run01,phase2,credential_access_chain,learning+dry-run,credential_theft_chain,BLOCK,false,false,0,false,false,true,true,
-2026-06-01-run01,phase2,discovery_port_scan,learning+dry-run,port_scan,ALERT,false,false,0,false,false,true,true,
-2026-06-01-run01,phase3,burst_replay,learning+dry-run,mixed,ALERT,false,false,0,false,false,true,true,
-2026-06-01-run01,phase3,ingest_dependency_down,learning+dry-run,mixed,SAFE_DEGRADE,false,false,0,false,false,true,true,
-2026-06-01-run01,phase4,credential_access_chain,enforcement,credential_theft_chain,BLOCK,true,true,0,false,false,true,true,
-2026-06-01-run01,phase4,suid_binary,enforcement,suid_binary_created,QUARANTINE,true,true,0,false,false,true,true,
+2026-06-01-run01,phase0,preflight_session,lab-precheck,none,LOG,false,false,0,false,false,true,true,Confirm isolation network + snapshots + copied scorecard path
+2026-06-01-run01,phase1,benign_web_burst,learning+dry-run,none,LOG,false,false,0,false,false,true,true,Replay baseline from logs/decision_audit.jsonl
+2026-06-01-run01,phase1,initial_access_replay,learning+dry-run,brute_force_ssh,ALERT,false,false,0,false,false,true,true,Safe baseline replay via make demo-all-attacks
+2026-06-01-run01,phase1,execution_tmp_exec_replay,learning+dry-run,scratch_space_exec,KILL,false,false,0,false,false,true,true,Safe baseline replay via make demo-all-attacks
+2026-06-01-run01,phase1,persistence_systemd_replay,learning+dry-run,systemd_persistence,ALERT,false,false,0,false,false,true,true,Safe baseline replay via make demo-all-attacks
+2026-06-01-run01,phase1,credential_access_chain_replay,learning+dry-run,credential_theft_chain,BLOCK,false,false,0,false,false,true,true,Safe baseline replay via make demo-all-attacks
+2026-06-01-run01,phase1,discovery_port_scan_replay,learning+dry-run,port_scan,BLOCK,false,false,0,false,false,true,true,Safe baseline replay via make demo-all-attacks
+2026-06-01-run01,phase1,lateral_movement_replay,learning+dry-run,container_breakout,KILL,false,false,0,false,false,true,true,Safe baseline replay via make demo-all-attacks
+2026-06-01-run01,phase1,priv_esc_staging_replay,learning+dry-run,suid_binary_created,QUARANTINE,false,false,0,false,false,true,true,Safe baseline replay via make demo-all-attacks
+2026-06-01-run01,phase2,initial_access,learning+dry-run,brute_force_ssh,ALERT,false,false,0,false,false,true,true,Record lab VM result after category completion
+2026-06-01-run01,phase2,execution,learning+dry-run,scratch_space_exec,KILL,false,false,0,false,false,true,true,Record lab VM result after category completion
+2026-06-01-run01,phase2,persistence,learning+dry-run,systemd_persistence,ALERT,false,false,0,false,false,true,true,Record lab VM result after category completion
+2026-06-01-run01,phase2,credential_access,learning+dry-run,credential_theft_chain,BLOCK,false,false,0,false,false,true,true,Record lab VM result after category completion
+2026-06-01-run01,phase2,discovery,learning+dry-run,port_scan,ALERT,false,false,0,false,false,true,true,Record lab VM result after category completion
+2026-06-01-run01,phase2,lateral_movement,learning+dry-run,container_breakout,KILL,false,false,0,false,false,true,true,Record lab VM result after category completion
+2026-06-01-run01,phase2,priv_esc_staging,learning+dry-run,suid_binary_created,QUARANTINE,false,false,0,false,false,true,true,Record lab VM result after category completion
+2026-06-01-run01,phase3,burst_replay,learning+dry-run,mixed,ALERT,false,false,0,false,false,true,true,Document burst replay stability and latency notes
+2026-06-01-run01,phase3,dependency_interrupt,learning+dry-run,dependency_down,LOG,false,false,0,false,false,true,true,Document recovery behavior and latency notes
+2026-06-01-run01,phase3,network_interrupt,learning+dry-run,mixed,SAFE_DEGRADE,false,false,0,false,false,true,true,Document live lab interruption behavior
+2026-06-01-run01,phase4,initial_access,enforcement,brute_force_ssh,ALERT,true,true,0,false,false,true,true,Re-run full category sequence with enforcement enabled
+2026-06-01-run01,phase4,execution,enforcement,scratch_space_exec,KILL,true,true,0,false,false,true,true,Re-run full category sequence with enforcement enabled
+2026-06-01-run01,phase4,persistence,enforcement,systemd_persistence,ALERT,true,true,0,false,false,true,true,Re-run full category sequence with enforcement enabled
+2026-06-01-run01,phase4,credential_access,enforcement,credential_theft_chain,BLOCK,true,true,0,false,false,true,true,Re-run full category sequence with enforcement enabled
+2026-06-01-run01,phase4,discovery,enforcement,port_scan,ALERT,true,true,0,false,false,true,true,Re-run full category sequence with enforcement enabled
+2026-06-01-run01,phase4,lateral_movement,enforcement,container_breakout,KILL,true,true,0,false,false,true,true,Re-run full category sequence with enforcement enabled
+2026-06-01-run01,phase4,priv_esc_staging,enforcement,suid_binary_created,QUARANTINE,true,true,0,false,false,true,true,Re-run full category sequence with enforcement enabled
+2026-06-01-run01,phase5,tuning_delta,compare-prior-run,mixed,REVIEW,false,false,0,false,false,true,true,Track minimal tuning change and trend versus prior run
+2026-06-01-run01,phase5,retest_after_restore,compare-prior-run,mixed,REVIEW,false,false,0,false,false,true,true,Restore snapshot and compare scorecard trend before promotion

@@ -13,9 +13,17 @@ Use this together with:
 
 ---
 
-## Phase 0 — Isolated Scope Gate (mandatory)
+## Phase 0 — Pre-Flight Session Setup (mandatory)
 
-Pass this gate before any attack simulation:
+Run this once per lab session before any attack simulation:
+
+```bash
+cd /tmp/workspace/sierengowskisierengowski-cpu/Bifrost
+cp docs/templates/live-fire-scorecard.csv \
+   docs/templates/live-fire-scorecard-$(date +%F)-run01.csv
+```
+
+Then pass this gate before continuing:
 
 - Host-only/private network with no production routes
 - All VMs snapshotted (`pre-test`)
@@ -26,7 +34,7 @@ If any item fails: **stop test execution**.
 
 ---
 
-## Phase 1 — Safe-Mode Validation (learning + dry-run)
+## Phase 1 — Safe Baseline Replay (learning + dry-run)
 
 Start with non-enforcing mode:
 
@@ -38,10 +46,12 @@ Start with non-enforcing mode:
 }
 ```
 
-Run baseline replay:
+Run the baseline replay from the repository root:
 
 ```bash
-python3 -m bifrost.demo --scenario examples/replay/benign_web_burst.jsonl
+cd /tmp/workspace/sierengowskisierengowski-cpu/Bifrost
+make demo-benign
+make demo-all-attacks
 ```
 
 Gate criteria:
@@ -50,13 +60,14 @@ Gate criteria:
 - Decisions are produced for expected events
 - No destructive action is actually enforced
 - Benign replay does not produce high-confidence destructive decisions
+- Results are captured from `logs/decision_audit.jsonl`
 
 ---
 
 ## Phase 2 — Progressive Attack Categories
 
-Execute attack categories in increasing disruption order from
-[lab-attack-simulation.md](./lab-attack-simulation.md):
+Use the VM commands in [lab-attack-simulation.md](./lab-attack-simulation.md)
+and execute categories in this order:
 
 1. Initial access
 2. Execution
@@ -66,7 +77,8 @@ Execute attack categories in increasing disruption order from
 6. Lateral movement
 7. Privilege escalation staging (SUID)
 
-For each category, record in scorecard:
+After each category, record expected vs actual behavior in the copied scorecard
+CSV:
 
 - Expected threat class, severity, action
 - Detection latency
@@ -81,9 +93,19 @@ Gate criteria:
 
 ---
 
-## Phase 3 — Stress and Failure Injection
+## Phase 3 — Stress and Failure Drills
 
 Validate resilience under pressure and dependency failure.
+
+Replay the stress scenarios first:
+
+```bash
+cd /tmp/workspace/sierengowskisierengowski-cpu/Bifrost
+make demo-burst
+make demo-depdown
+```
+
+Then run the equivalent lab-side dependency and network interruption checks.
 
 Recommended checks:
 
@@ -97,6 +119,7 @@ Gate criteria:
 - System degrades safely (alerts/logs, no unsafe autonomous action)
 - Components recover cleanly after dependency restoration
 - Event processing resumes without manual data surgery
+- Recovery behavior and latency are recorded in scorecard notes
 
 ---
 
@@ -112,7 +135,7 @@ Only after stable dry-run results, move to enforcement in lab:
 }
 ```
 
-Re-run the same scenarios and verify:
+Re-run the same Phase 2 category sequence and verify:
 
 - Intended action is actually executed when policy allows
 - RFC1918/loopback protections are honored unless explicitly overridden
@@ -149,9 +172,9 @@ Per validation cycle:
 
 1. Phase 0 once per lab session
 2. Phase 1 once after config changes
-3. Phase 2 full scenario sweep
-4. Phase 3 failure checks
-5. Phase 4 enforcement sweep
+3. Phase 2 full category sweep in dry-run
+4. Phase 3 replay and live failure drills
+5. Phase 4 full category sweep in enforcement
 6. Phase 5 tune-and-repeat as needed
 
 Treat each cycle as complete only when scorecard evidence is filled in.
