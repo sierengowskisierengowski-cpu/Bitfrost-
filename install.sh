@@ -23,7 +23,7 @@ fi
 
 echo "[*] Installing Python dependencies..."
 pip install --break-system-packages --quiet \
-    psutil openai requests paho-mqtt anthropic fastapi uvicorn
+    psutil openai requests paho-mqtt anthropic fastapi uvicorn pydantic
 
 echo "[*] Building Go agent..."
 cd "$BIFROST_DIR/agent"

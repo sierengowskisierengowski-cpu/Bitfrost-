@@ -61,6 +61,8 @@ test:
 	@test -x .venv/bin/python3 || python3 -m venv .venv
 	@.venv/bin/python3 -c "import pytest" >/dev/null 2>&1 || \
 		(.venv/bin/python3 -m pip install --quiet pytest && echo "[+] Installed pytest in .venv")
+	@.venv/bin/python3 -c "import pydantic" >/dev/null 2>&1 || \
+		(.venv/bin/python3 -m pip install --quiet pydantic && echo "[+] Installed pydantic in .venv")
 	.venv/bin/python3 -m pytest tests/ -v
 
 lab-validate:

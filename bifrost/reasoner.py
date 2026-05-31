@@ -22,6 +22,8 @@ import secrets
 import sqlite3
 from datetime import datetime, timezone
 
+from pydantic import BaseModel, Field
+
 def _parse_ts(ts: str):
     try:
         return datetime.fromisoformat(ts.replace("Z", "+00:00"))
@@ -105,7 +107,23 @@ def detect_cowrie_dns_pivot_chain(events: list) -> list:
 
 from collections import deque
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
+
+
+class ThreatAnalysisResponse(BaseModel):
+    threat_class: str = Field(description="Primary identified threat classification.")
+    mitre_tactic: Literal[
+        "Initial Access", "Execution", "Persistence", "Privilege Escalation",
+        "Defense Evasion", "Credential Access", "Discovery", "Lateral Movement",
+        "Collection", "Command and Control", "Exfiltration", "Impact"
+    ]
+    mitre_technique: str = Field(description="MITRE ATT&CK technique ID e.g. T1059.004")
+    severity: Literal["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+    action: Literal["KILL", "BLOCK", "QUARANTINE", "ALERT", "LOG", "NONE"]
+    reasoning: str = Field(description="One sentence analytical justification.")
+
+
+OLLAMA_JSON_SCHEMA = ThreatAnalysisResponse.model_json_schema()
 
 from bifrost.extractor import format_for_heimdall
 from bifrost.security import TELEMETRY_TRUST_PREAMBLE, sanitize_telemetry_for_llm
@@ -377,6 +395,8 @@ def route_to_ollama(
                     {"role": "system", "content": system_baseline},
                     {"role": "user", "content": prompt},
                 ],
+                response_format=OLLAMA_JSON_SCHEMA,
+                temperature=0.0,
                 logger=log,
             ),
             provider="ollama",

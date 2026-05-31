@@ -88,13 +88,14 @@ def ollama_chat(
     messages: list[dict],
     logger,
     temperature: Optional[float] = None,
+    response_format: Optional[object] = None,
 ) -> dict:
     url = resolve_ollama_chat_url(config.get("local_url", "http://127.0.0.1:11434/v1"))
     payload = {
         "model": model,
         "messages": messages,
         "stream": False,
-        "format": "json",
+        "format": response_format if response_format is not None else "json",
         "options": {
             "num_ctx": _as_int(config.get("llm_num_ctx", DEFAULT_NUM_CTX), DEFAULT_NUM_CTX),
             "num_predict": _as_int(
