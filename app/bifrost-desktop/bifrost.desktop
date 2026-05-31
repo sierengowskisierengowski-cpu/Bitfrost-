@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Bifrost
+Comment=Norse rainbow-bridge security dashboard
+Exec=/usr/bin/bifrost
+Icon=bifrost
+Terminal=false
+Categories=Utility;

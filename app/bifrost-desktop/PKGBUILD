@@ -19,4 +19,8 @@ build() {
 
 package() {
   install -Dm755 "$srcdir/Bifrost/app/bifrost-desktop/src-tauri/target/release/bifrost" "$pkgdir/usr/bin/bifrost"
+  install -Dm644 "$srcdir/Bifrost/app/bifrost-desktop/bifrost.desktop" \
+    "$pkgdir/usr/share/applications/bifrost.desktop"
+  install -Dm644 "$srcdir/Bifrost/app/bifrost-desktop/src-tauri/icons/128x128@2x.png" \
+    "$pkgdir/usr/share/icons/hicolor/256x256/apps/bifrost.png"
 }

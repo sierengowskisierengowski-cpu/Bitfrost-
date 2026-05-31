@@ -23,7 +23,7 @@ bifrost-desktop/
 └── src-tauri/              # the native Rust shell
     ├── Cargo.toml
     ├── build.rs
-    ├── tauri.conf.json     # window, bundle (deb + appimage), withGlobalTauri
+    ├── tauri.conf.json     # window, bundle (appimage), withGlobalTauri
     ├── capabilities/       # window + shell + notification permissions
     ├── icons/              # app icons
     └── src/
@@ -59,7 +59,7 @@ guardian is launched as `python3 <script> --port 8766`.
 
 ## Prerequisites (Linux)
 
-Install the Tauri system dependencies (Debian/Ubuntu only):
+Install the Tauri system dependencies (Arch Linux):
 
 ```bash
 sudo ./scripts/setup-linux-build-env.sh
@@ -72,6 +72,7 @@ This installs all required native libraries and places `linuxdeploy` at:
 If needed, the install command used by the script is:
 
 ```bash
+sudo pacman -S --noconfirm webkit2gtk-4.1 gtk3 base-devel libayatana-appindicator fuse2
 wget -O /usr/local/bin/linuxdeploy https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
 chmod +x /usr/local/bin/linuxdeploy
 ```
@@ -107,13 +108,12 @@ pnpm desktop:build    # = tauri build
 
 Artifacts are written to:
 
-- `src-tauri/target/release/bundle/deb/*.deb`
 - `src-tauri/target/release/bundle/appimage/*.AppImage`
 
 `src-tauri/tauri.conf.json` explicitly bundles only:
 
 ```json
-"targets": ["deb", "appimage"]
+"targets": ["appimage"]
 ```
 
 ## Arch Linux package (pacman / makepkg)
@@ -128,6 +128,8 @@ makepkg -si
 This builds the desktop binary and installs:
 
 - `/usr/bin/bifrost`
+- `/usr/share/applications/bifrost.desktop`
+- `/usr/share/icons/hicolor/256x256/apps/bifrost.png`
 
 ## Icons
 
