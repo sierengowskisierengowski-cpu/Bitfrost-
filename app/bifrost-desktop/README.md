@@ -129,7 +129,7 @@ This builds the desktop binary and installs:
 
 - `/usr/bin/bifrost`
 - `/usr/share/applications/bifrost.desktop`
-- `/usr/share/icons/hicolor/256x256/apps/bifrost.png` (source image is 256x256; filename uses @2x naming: `src-tauri/icons/128x128@2x.png`)
+- `/usr/share/icons/hicolor/256x256/apps/bifrost.png` (source image is 256x256; verified from `src-tauri/icons/128x128@2x.png` despite the @2x name)
 
 ## Icons
 
