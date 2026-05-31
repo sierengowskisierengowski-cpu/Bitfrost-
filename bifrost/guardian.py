@@ -1858,6 +1858,7 @@ def main(argv=None):
     log.info("=" * 60)
     log.info(f"Heimdall Guardian v{BIFROST_VERSION} starting.")
     log.info("=" * 60)
+    sanitize_telemetry_for_llm("guardian_init")
 
     config = apply_cli_overrides(load_config(), args)
     refresh_runtime_paths(config)
