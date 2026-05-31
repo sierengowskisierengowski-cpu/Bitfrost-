@@ -58,7 +58,7 @@ from bifrost.security import (
     sanitize_telemetry_for_llm,
 )
 
-BIFROST_VERSION = "0.1.1"
+BIFROST_VERSION = "0.3.0"
 
 VM_TEST_PROFILE_DEFAULTS = {
     "local_url": "http://127.0.0.1:11434/v1",
@@ -559,27 +559,6 @@ def _normalize_compressed_event_rows(conn):
                 SET compressed_event = ?
                 WHERE id = ?
             """, updates)
-
-
-def banner(config):
-    tier = config.get("hardware_tier", "UNKNOWN")
-    analyst = config.get("analyst_model") or "Cloud Routed"
-    extractor = config.get("extractor_model") or "Rules Only"
-    learning = config.get("learning_period_days", 7)
-
-    print(f"""
-╔══════════════════════════════════════════════════════╗
-║           HEIMDALL GUARDIAN v{BIFROST_VERSION}                   ║
-║           Bifrost Security Platform                  ║
-║                                                      ║
-║   Hardware Tier : {tier:<34}║
-║   Analyst Model : {analyst:<34}║
-║   Extractor     : {extractor:<34}║
-║   Learning Days : {str(learning):<34}║
-║                                                      ║
-║   The Bridge Is Watched. Heimdall Never Sleeps.      ║
-╚══════════════════════════════════════════════════════╝
-""")
 
 
 class AuditdCollector(threading.Thread):
@@ -1967,6 +1946,10 @@ def _launch_desktop_window(url: str, log: logging.Logger) -> None:
 
 
 def main(argv=None):
+    from bifrost.banner import print_startup_banner
+
+    print_startup_banner(version=BIFROST_VERSION)
+
     args = parse_args(argv)
     log = setup_logging()
     log.info("=" * 60)
@@ -1984,7 +1967,13 @@ def main(argv=None):
         )
         sys.exit(1)
 
-    banner(config)
+    log.info(
+        "Config: tier=%s analyst=%s extractor=%s learning_days=%s",
+        config.get("hardware_tier", "UNKNOWN"),
+        config.get("analyst_model") or "Cloud Routed",
+        config.get("extractor_model") or "Rules Only",
+        config.get("learning_period_days", 7),
+    )
 
     db_path = init_database()
     log.info(f"Database initialized: {db_path}")

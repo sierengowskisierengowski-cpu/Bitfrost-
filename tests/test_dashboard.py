@@ -6,7 +6,10 @@ from datetime import datetime, timezone
 
 from bifrost.dashboard import (
     DISCLAIMER_TEXT,
+    API_SLICE_PATHS,
     build_dashboard_state,
+    build_guardian_client_state,
+    extract_api_slice,
     parse_time_range,
     render_dashboard_html,
 )
@@ -333,3 +336,84 @@ def test_render_dashboard_html_shows_inactive_panel_when_no_summaries(tmp_path):
     assert "Test Run Status" in html
     assert "test-run-panel" in html
     assert "test-mode" in html
+
+
+def _sample_incident_jsonl():
+    return [
+        {
+            "record_type": "incident",
+            "timestamp": "2026-05-30T12:00:00Z",
+            "severity": "HIGH",
+            "threat_class": "brute_force_ssh",
+            "attacker_identity": "45.83.64.11",
+            "confidence": 0.91,
+            "policy_allowed": True,
+            "action_taken": "ALERT",
+            "summary": "SSH brute-force detected.",
+            "mitre_attack": [
+                {
+                    "tactic_id": "TA0006",
+                    "tactic": "Credential Access",
+                    "technique_id": "T1110",
+                    "technique": "Brute Force",
+                }
+            ],
+        },
+    ]
+
+
+def test_build_guardian_client_state_maps_camel_case(tmp_path):
+    db_path = tmp_path / "events.db"
+    jsonl_path = tmp_path / "live_monitor.jsonl"
+    _make_db(db_path, ["2026-05-30T12:00:00Z"])
+    _write_jsonl(jsonl_path, _sample_incident_jsonl())
+
+    state = build_dashboard_state(
+        db_path=db_path,
+        live_monitor_jsonl_path=jsonl_path,
+        now=datetime(2026, 5, 30, 12, 30, tzinfo=timezone.utc),
+    )
+    client = build_guardian_client_state(state)
+
+    assert "guardianState" in state
+    assert client["incidents"][0]["threatClass"] == "brute_force_ssh"
+    assert client["incidents"][0]["attackerIp"] == "45.83.64.11"
+    assert client["incidents"][0]["confidenceScore"] == 91
+    assert client["attackers"][0]["ip"] == "45.83.64.11"
+    assert client["attackers"][0]["flag"]
+    assert len(client["liveEvents"]) >= 1
+    assert client["liveEvents"][0]["attackerIp"] == "45.83.64.11"
+
+
+def test_api_slice_endpoints_return_data(tmp_path):
+    db_path = tmp_path / "events.db"
+    jsonl_path = tmp_path / "live_monitor.jsonl"
+    _make_db(db_path, ["2026-05-30T12:00:00Z"])
+    _write_jsonl(jsonl_path, _sample_incident_jsonl())
+
+    state = build_dashboard_state(
+        db_path=db_path,
+        live_monitor_jsonl_path=jsonl_path,
+        now=datetime(2026, 5, 30, 12, 30, tzinfo=timezone.utc),
+    )
+
+    assert API_SLICE_PATHS == frozenset({
+        "/api/attackers",
+        "/api/incidents",
+        "/api/live",
+        "/api/timeline",
+        "/api/mitre",
+    })
+
+    attackers = extract_api_slice(state, "/api/attackers")
+    incidents = extract_api_slice(state, "/api/incidents")
+    live = extract_api_slice(state, "/api/live")
+    timeline = extract_api_slice(state, "/api/timeline")
+    mitre = extract_api_slice(state, "/api/mitre")
+
+    assert len(attackers["attackers"]) == 1
+    assert attackers["attackers"][0]["totalHits"] == 1
+    assert len(incidents["incidents"]) == 1
+    assert len(live["liveEvents"]) == 1
+    assert isinstance(timeline["timeline"], list)
+    assert isinstance(mitre["mitre"], list)

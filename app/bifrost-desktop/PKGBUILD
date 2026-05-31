@@ -5,6 +5,7 @@ pkgdesc="Bifrost AI-powered EDR — Rainbow Bridge"
 arch=('x86_64')
 url="https://github.com/sierengowskisierengowski-cpu/Bifrost"
 license=('custom')
+install=bifrost.install
 depends=(
   'webkit2gtk-4.1'
   'gtk3'

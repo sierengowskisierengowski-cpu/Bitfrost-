@@ -5,6 +5,7 @@ import { BifrostLogo } from "./BifrostLogo";
 import { LegalPanel } from "./Legal";
 import { setPassword, setLegalAccepted, setSetupComplete } from "@/lib/app-state";
 import { getSettings, saveSettings, baseUrl } from "@/lib/api";
+import { guardianFetch } from "@/lib/guardianFetch";
 import { passwordStrength } from "@/lib/app-state";
 
 function BridgeArt() {
@@ -57,9 +58,10 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
     try {
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), 2500);
-      const res = await fetch(`${baseUrl({ ...s0, guardianHost: host, dashboardPort: port })}/api/state`, {
-        signal: ctrl.signal,
-      });
+      const res = await guardianFetch(
+        `${baseUrl({ ...s0, guardianHost: host, dashboardPort: port })}/api/state`,
+        { signal: ctrl.signal, credentials: "include" },
+      );
       clearTimeout(t);
       setTestState(res.ok ? "ok" : "fail");
     } catch {

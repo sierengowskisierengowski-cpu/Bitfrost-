@@ -9,6 +9,7 @@ import type {
   OverviewStats,
 } from "./types";
 import { generateGuardianState, makeLiveEvent, buildMitre } from "./mockData";
+import { guardianFetch } from "./guardianFetch";
 
 /* ---------------- settings ---------------- */
 
@@ -110,7 +111,10 @@ class GuardianClient {
   start() {
     if (this.started) return;
     this.started = true;
-    fetch(`${baseUrl()}/api/disclaimer/accept`, { method: "POST", credentials: "include" }).catch(() => {});
+    guardianFetch(`${baseUrl()}/api/disclaimer/accept`, {
+      method: "POST",
+      credentials: "include",
+    }).catch(() => {});
     this.poll();
     this.pollTimer = setInterval(() => this.poll(), getSettings().refreshIntervalMs);
     this.scheduleLive();
@@ -136,14 +140,16 @@ class GuardianClient {
     try {
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), 2500);
-      const res = await fetch(url, { signal: ctrl.signal, credentials: "include" });
+      const res = await guardianFetch(url, { signal: ctrl.signal, credentials: "include" });
       clearTimeout(t);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = (await res.json()) as Partial<GuardianState>;
-      this.state = { ...this.state, ...data };
+      const data = (await res.json()) as Record<string, unknown>;
+      const guardianState = (data.guardianState ?? {}) as Partial<GuardianState>;
+      this.state = { ...this.state, ...guardianState };
       this.backoff = 1;
       this.setConn({ status: "connected", source: "live", lastUpdated: Date.now(), retryInSec: 0 });
       this.emitState();
+      this.emitLive();
     } catch {
       // No guardian reachable — fall back to the rich local model (also powers offline mode).
       this.backoff = Math.min(this.backoff * 2, 30);

@@ -23,7 +23,7 @@ bifrost-desktop/
 └── src-tauri/              # the native Rust shell
     ├── Cargo.toml
     ├── build.rs
-    ├── tauri.conf.json     # window, bundle (appimage), withGlobalTauri
+    ├── tauri.conf.json     # window, bundle targets [], withGlobalTauri
     ├── capabilities/       # window + shell + notification permissions
     ├── icons/              # app icons
     └── src/
@@ -65,17 +65,7 @@ Install the Tauri system dependencies (Arch Linux):
 sudo ./scripts/setup-linux-build-env.sh
 ```
 
-This installs all required native libraries and places `linuxdeploy` at:
-
-`/usr/local/bin/linuxdeploy`
-
-If needed, the install command used by the script is:
-
-```bash
-sudo pacman -S --noconfirm webkit2gtk-4.1 gtk3 base-devel libayatana-appindicator fuse2
-wget -O /usr/local/bin/linuxdeploy https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-chmod +x /usr/local/bin/linuxdeploy
-```
+This installs WebKit/GTK and other native libraries required by Tauri on Arch.
 
 Then install the toolchains:
 
@@ -99,26 +89,23 @@ pnpm desktop:dev      # = tauri dev (starts Vite on :5173 + the native window)
 
 `pnpm dev` alone runs just the web frontend in a browser (mock-data mode).
 
-## Build a release bundle
+## Build the release binary
 
 ```bash
 pnpm install
-pnpm desktop:build    # = tauri build
+pnpm desktop:build    # = tauri build (binary only, no AppImage)
 ```
 
-Artifacts are written to:
+Artifact:
 
-- `src-tauri/target/release/bundle/appimage/*.AppImage`
+- `src-tauri/target/release/bifrost`
 
-`src-tauri/tauri.conf.json` explicitly bundles only:
+`tauri.conf.json` sets `"targets": []` so the build does not invoke linuxdeploy.
+AppImage is not supported; use the PKGBUILD on Arch Linux.
 
-```json
-"targets": ["appimage"]
-```
+## Arch Linux install (official)
 
-## Arch Linux package (pacman / makepkg)
-
-An Arch package recipe is provided at `PKGBUILD`.
+The supported install path on Arch is `makepkg` using `PKGBUILD`.
 
 ```bash
 cd app/bifrost-desktop

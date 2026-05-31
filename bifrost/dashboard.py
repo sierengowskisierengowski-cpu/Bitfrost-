@@ -364,6 +364,228 @@ def _summarize_timeline(
     ]
 
 
+def _normalize_severity(value: object) -> str:
+    sev = str(value or "LOW").upper()
+    if sev in {"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"}:
+        return sev
+    return "LOW"
+
+
+def _confidence_percent(value: object) -> int:
+    try:
+        raw = float(value)
+    except (TypeError, ValueError):
+        return 0
+    if raw <= 1.0:
+        return int(round(max(0.0, min(1.0, raw)) * 100))
+    return int(round(max(0.0, min(100.0, raw))))
+
+
+def _map_incident_for_client(incident: Mapping[str, Any], index: int) -> dict[str, Any]:
+    mitre_list = incident.get("mitre_attack") or []
+    mitre = mitre_list[0] if mitre_list and isinstance(mitre_list[0], Mapping) else {}
+    action = str(
+        incident.get("action_taken")
+        or incident.get("action_effective")
+        or incident.get("action_required")
+        or "LOG"
+    )
+    return {
+        "id": str(incident.get("id") or f"inc-{incident.get('timestamp', index)}"),
+        "timestamp": str(incident.get("timestamp") or ""),
+        "severity": _normalize_severity(incident.get("severity")),
+        "threatClass": str(incident.get("threat_class") or "unknown"),
+        "attackerIp": str(incident.get("attacker_identity") or "unknown"),
+        "mitreTechnique": str(mitre.get("technique_id") or "—"),
+        "mitreTechniqueName": str(mitre.get("technique") or "—"),
+        "mitreTactic": str(mitre.get("tactic") or "—"),
+        "actionTaken": action.upper(),
+        "confidenceScore": _confidence_percent(incident.get("confidence")),
+        "summary": str(incident.get("summary") or incident.get("reasoning") or ""),
+        "model": str(incident.get("reasoner_model") or "heimdall"),
+        "latencyMs": int(incident.get("latency_ms") or 0),
+    }
+
+
+def _map_attacker_for_client(profile: Mapping[str, Any]) -> dict[str, Any]:
+    events = []
+    for item in profile.get("events") or []:
+        if not isinstance(item, Mapping):
+            continue
+        events.append(
+            {
+                "timestamp": str(item.get("timestamp") or ""),
+                "type": str(item.get("threat_class") or "unknown"),
+                "command": str(item.get("summary") or item.get("command") or ""),
+                "decision": str(item.get("action_taken") or "LOG"),
+                "severity": _normalize_severity(item.get("severity")),
+            }
+        )
+    return {
+        "ip": str(profile.get("ip") or "unknown"),
+        "country": str(profile.get("country_label") or "Unknown"),
+        "countryCode": str(profile.get("country_code") or "??"),
+        "flag": str(profile.get("country_flag") or "🌐"),
+        "firstSeen": str(profile.get("first_seen") or ""),
+        "lastSeen": str(profile.get("last_seen") or ""),
+        "totalHits": int(profile.get("total_hits") or 0),
+        "threatLevel": _normalize_severity(profile.get("threat_level")),
+        "attackTypes": list(profile.get("event_types") or []),
+        "hassh": str(profile.get("hassh") or "—"),
+        "ja4": str(profile.get("ja4") or "—"),
+        "events": events,
+        "credentials": list(profile.get("credentials") or []),
+        "sessions": list(profile.get("sessions") or []),
+    }
+
+
+def _map_live_event_for_client(incident: Mapping[str, Any], index: int) -> dict[str, Any]:
+    mapped = _map_incident_for_client(incident, index)
+    return {
+        "id": f"live-{mapped['id']}",
+        "timestamp": mapped["timestamp"],
+        "attackerIp": mapped["attackerIp"],
+        "attackType": mapped["threatClass"],
+        "category": mapped["threatClass"],
+        "commandRun": mapped["summary"],
+        "decision": mapped["actionTaken"],
+        "confidence": mapped["confidenceScore"],
+        "model": mapped["model"],
+        "latencyMs": mapped["latencyMs"],
+        "severity": mapped["severity"],
+    }
+
+
+def build_guardian_client_state(state: Mapping[str, Any]) -> dict[str, Any]:
+    """CamelCase guardian payload for the Tauri desktop client."""
+    raw_incidents = state.get("all_incidents") or state.get("incidents") or []
+    incidents = [
+        _map_incident_for_client(inc, idx)
+        for idx, inc in enumerate(raw_incidents)
+        if isinstance(inc, Mapping)
+    ]
+    attackers = [
+        _map_attacker_for_client(profile)
+        for profile in (state.get("attackers") or [])
+        if isinstance(profile, Mapping)
+    ]
+    live_events = [
+        _map_live_event_for_client(inc, idx)
+        for idx, inc in enumerate(raw_incidents[:200])
+        if isinstance(inc, Mapping)
+    ]
+
+    summary = state.get("summary") or {}
+    settings = state.get("settings") or {}
+    top_threats = state.get("top_threat_classes") or []
+
+    categories = [
+        {"name": str(item.get("name") or "unknown"), "count": int(item.get("count") or 0)}
+        for item in top_threats
+        if isinstance(item, Mapping)
+    ]
+
+    mitre_counts: Counter[str] = Counter()
+    for inc in incidents:
+        tactic = str(inc.get("mitreTactic") or "")
+        technique = str(inc.get("mitreTechnique") or "")
+        if tactic and tactic != "—":
+            mitre_counts[f"{tactic}|{technique}"] += 1
+
+    return {
+        "incidents": incidents,
+        "attackers": attackers,
+        "liveEvents": live_events,
+        "categories": categories,
+        "counters": {
+            "eventsPerMin": max(
+                int(summary.get("last_hour_incidents") or 0),
+                len(state.get("minute_breakdown") or []),
+            ),
+            "activeAttackers": int(summary.get("unique_attackers") or len(attackers)),
+            "queueDepth": int(
+                (state.get("test_mode") or {}).get("latest_summary", {}).get(
+                    "queue_size", 0
+                )
+            ),
+            "processedToday": int(summary.get("db_events") or 0),
+        },
+        "aiModel": {
+            "model": str(settings.get("analyst_model") or "heimdall"),
+            "lastResponseMs": 0,
+            "successRate": 99.0,
+            "failureRate": 1.0,
+            "circuitState": "CLOSED",
+            "prewarm": True,
+        },
+        "hardware": {
+            "tier": str(settings.get("hardware_tier") or "TIER_4"),
+            "ramUsed": 0.0,
+            "ramTotal": 16.0,
+            "cpuPercent": 0.0,
+            "diskUsed": 0.0,
+            "diskTotal": 100.0,
+            "uptimeSec": int(settings.get("uptime_seconds") or 0),
+        },
+        "config": {
+            "learningMode": bool(settings.get("learning_mode", True)),
+            "dryRun": bool(settings.get("dry_run", True)),
+            "autonomous": bool(settings.get("autonomous_actions_enabled", False)),
+            "confidenceThreshold": float(settings.get("confidence_threshold") or 0.85),
+            "modelsLoaded": [
+                m
+                for m in (
+                    settings.get("analyst_model"),
+                    settings.get("extractor_model"),
+                )
+                if m
+            ],
+            "hardwareTier": str(settings.get("hardware_tier") or "TIER_4"),
+            "databasePath": str(settings.get("db_path") or ""),
+            "logPath": str(settings.get("log_path") or ""),
+            "cowrieLogPath": "",
+            "ingestPort": 8765,
+            "dashboardPort": int(settings.get("dashboard_port") or 8766),
+            "guardianHost": str(settings.get("dashboard_host") or "127.0.0.1"),
+            "tokens": {
+                "ingest": bool((settings.get("tokens") or {}).get("ingest")),
+                "executor": bool((settings.get("tokens") or {}).get("executor")),
+                "dashboard": bool((settings.get("tokens") or {}).get("dashboard")),
+            },
+        },
+        "mitreTacticCounts": [
+            {"tactic": key.split("|", 1)[0], "technique": key.split("|", 1)[1], "count": count}
+            for key, count in mitre_counts.most_common(24)
+        ],
+        "timeline": list(state.get("timeline") or []),
+    }
+
+
+def extract_api_slice(state: Mapping[str, Any], path: str) -> dict[str, Any]:
+    """Return JSON body for a dashboard API slice endpoint."""
+    client = build_guardian_client_state(state)
+    if path == "/api/attackers":
+        return {"attackers": client["attackers"]}
+    if path == "/api/incidents":
+        return {"incidents": client["incidents"]}
+    if path == "/api/live":
+        return {"liveEvents": client["liveEvents"]}
+    if path == "/api/timeline":
+        return {"timeline": client["timeline"]}
+    if path == "/api/mitre":
+        return {"mitre": client["mitreTacticCounts"]}
+    raise KeyError(path)
+
+
+API_SLICE_PATHS = frozenset({
+    "/api/attackers",
+    "/api/incidents",
+    "/api/live",
+    "/api/timeline",
+    "/api/mitre",
+})
+
+
 def build_settings_snapshot(
     config: Mapping[str, Any],
     *,
@@ -463,7 +685,7 @@ def build_dashboard_state(
 
     log_path = bifrost_paths.log_path(config) if config else db_path.parent / "guardian.log"
 
-    return {
+    payload = {
         "generated_at": now.isoformat().replace("+00:00", "Z"),
         "time_range": range_key,
         "connectivity": {
@@ -511,6 +733,8 @@ def build_dashboard_state(
             "min_incident_rows": MIN_INCIDENT_ROWS,
         },
     }
+    payload["guardianState"] = build_guardian_client_state(payload)
+    return payload
 
 
 def _severity_badge(severity: str) -> str:
@@ -824,6 +1048,20 @@ def _build_handler(server: "DashboardServer"):
                         "latest_summary": tm.get("latest_summary") or {},
                     }
                 )
+                return
+
+            if path in API_SLICE_PATHS:
+                if not _disclaimer_accepted(self):
+                    self.send_response(HTTPStatus.FORBIDDEN)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(b'{"error":"disclaimer_required"}')
+                    return
+                range_key = parse_time_range(
+                    (query.get("range") or [DEFAULT_TIME_RANGE])[0]
+                )
+                state = server.build_state(time_range=range_key)
+                self._write_json(extract_api_slice(state, path))
                 return
 
             if path not in {"/", ""}:

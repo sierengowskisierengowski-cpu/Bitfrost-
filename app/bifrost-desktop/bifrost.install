@@ -1,0 +1,12 @@
+#!/bin/bash
+# shellcheck disable=SC2034
+post_install() {
+  if [ -t 1 ] && [ -z "${BIFROST_NO_BANNER:-}" ]; then
+    export PYTHONPATH=/usr/lib/bifrost${PYTHONPATH:+:$PYTHONPATH}
+    python3 -m bifrost.banner 2>/dev/null || true
+  fi
+}
+
+post_upgrade() {
+  post_install
+}
