@@ -129,7 +129,7 @@ This builds the desktop binary and installs:
 
 - `/usr/bin/bifrost`
 - `/usr/share/applications/bifrost.desktop`
-- `/usr/share/icons/hicolor/256x256/apps/bifrost.png`
+- `/usr/share/icons/hicolor/256x256/apps/bifrost.png` (from `src-tauri/icons/128x128@2x.png`)
 
 ## Icons
 
