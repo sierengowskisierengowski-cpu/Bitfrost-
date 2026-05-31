@@ -1,6 +1,6 @@
 pkgname=bifrost
 pkgver=1.0.0
-pkgrel=1
+pkgrel=2
 pkgdesc="Bifrost AI-powered EDR — Rainbow Bridge"
 arch=('x86_64')
 url="https://github.com/sierengowskisierengowski-cpu/Bifrost"
@@ -23,7 +23,7 @@ sha256sums=('SKIP')
 build() {
   cd "$srcdir/Bifrost/app/bifrost-desktop"
   pnpm install --frozen-lockfile
-  pnpm tauri build --bundles none
+  pnpm tauri build
 }
 
 package() {
